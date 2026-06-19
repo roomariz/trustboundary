@@ -169,7 +169,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
     for finding in scored["findings"]:
         metadata = CATEGORY_METADATA.get(finding["category"], {})
         path = Path(finding.get("file") or "")
-        scope_tags = tuple(finding.get("scope_tags") or path_scope_tags(path, repo_config))
+        scope_tags = path_scope_tags(path, repo_config)
         production_blocker = finding["severity"] == "Critical" or (finding["severity"] == "High" and finding["confidence_level"] == BLOCKING_CONFIDENCE)
         if finding["rule"] == "high_entropy_literal":
             production_blocker = False
@@ -303,7 +303,7 @@ def top_risks(findings, repo_config=None):
     eligible = [
         finding
         for finding in findings
-        if "documentation" not in path_scope_tags(Path(finding.get("file") or ""), repo_config)
+        if path_scope_tags(Path(finding.get("file") or ""), repo_config) == ("production",)
         or finding.get("category") in {"leaked_secrets"}
     ]
     return sorted(
@@ -503,6 +503,15 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         "- Regex patterns can miss context-sensitive bugs and can produce false positives.",
         "- No network verification or live registry checking is performed.",
         "- Findings should be treated as leads for human review, not as proof of compromise.",
+    ])
+    if audit_warnings:
+        lines.extend([
+            "",
+            "## Audit Warnings",
+        ])
+        for warning in audit_warnings:
+            lines.append(f"- {warning.get('rule', 'scanner_failed')} - {warning.get('scanner', '-')}: {warning.get('message', '-')}")
+    lines.extend([
         "",
         "## Framework-Specific Findings",
     ])
@@ -640,6 +649,9 @@ def main(argv=None):
         json_output = build_json_output(target_repo, scored, scope_summary, audit_warnings=audit_warnings, repo_config=repo_config)
         findings_path.write_text(json.dumps(json_output, indent=2), encoding="utf-8")
         report = render_report(target_repo, scored, scope_summary, audit_warnings=audit_warnings, repo_config=repo_config)
+        warnings_block = render_audit_warnings(audit_warnings)
+        if warnings_block:
+            report += "\n" + warnings_block
         report_path.write_text(report, encoding="utf-8")
         emit("")
         log_line("Done.", kind="success", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)

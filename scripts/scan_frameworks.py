@@ -15,7 +15,7 @@ from scanner_utils import iter_repo_files, relativise, is_text_scan_target, is_e
 
 def scan_file(path, findings):
     try:
-        text = Path(path).read_text(errors="ignore")
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return
 

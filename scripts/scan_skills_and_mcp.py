@@ -98,7 +98,7 @@ def find_mcp_configs(repo_path, include_tests: bool = False, include_dependencie
     return sorted(set(out))
 
 def scan_skill_md(path, findings):
-    text = open(path, errors="ignore").read()
+    text = open(path, encoding="utf-8", errors="ignore").read()
     # over-broad allowed-tools
     m = re.search(r"allowed-tools:\s*(.+)", text)
     if m:
