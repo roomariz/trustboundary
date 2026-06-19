@@ -1081,6 +1081,37 @@ def test_readiness_gate_returns_machine_readable_reasons():
     assert result["decision_reasons"]
 
 
+def test_scoring_keeps_computed_classification_over_raw_finding_fields():
+    run_module = load_script_module("run_audit")
+    scored = run_module.score_findings(
+        [
+            {
+                "id": "OBS-RAW-1",
+                "category": "data_exfiltration",
+                "rule": "network_client_usage",
+                "file": "src/network.py",
+                "line": 3,
+                "severity": "Low",
+                "confidence_level": "HIGH",
+                "confidence_score": 35,
+                "confidence_band": "LOW",
+                "finding_class": "confirmed_vulnerability",
+                "evidence_level": "proven",
+                "proof_status": "source_only",
+                "source": "user_input",
+                "sink": "network",
+                "boundary_crossing": True,
+                "evidence_redacted": "fetch(url)",
+            }
+        ]
+    )
+
+    finding = scored["findings"][0]
+    assert finding["finding_class"] == "observed_capability"
+    assert finding["evidence_level"] == "capability"
+    assert finding["production_blocker"] is False
+
+
 def test_evidence_based_confidence_scores_and_bands(tmp_path):
     repo = tmp_path / "confidence"
     repo.mkdir()

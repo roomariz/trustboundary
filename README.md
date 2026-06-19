@@ -1,6 +1,8 @@
 # Trustboundary
 
-`repo-security-audit` is a read-only security audit plugin and CLI for repositories, skills, plugins and MCP-style tooling.
+TrustBoundary is a local, deterministic, read-only repository trust-boundary auditor.
+
+It reviews repositories, AI-generated code, MCP servers, agent systems, plugins and skills.
 
 ## Problem
 
@@ -11,6 +13,22 @@ Developers and AI-agent users need a quick way to audit unfamiliar code before t
 This package provides a read-only, CLI-backed security audit plugin. It scans a target repository with local static checks and produces structured JSON plus a Markdown report for review.
 
 The report includes a production security gate, Top Risks, Trust Boundary Assessment, aggregated findings summary, and Infrastructure Security Review. The release decision distinguishes `REVIEW_REQUIRED` from `NOT_READY_FOR_PRODUCTION`.
+
+## Evidence Classification
+
+TrustBoundary classifies findings by evidence strength:
+
+- `OBSERVED_CAPABILITY`: a security-relevant capability exists, but exploitability is not proven.
+- `POTENTIAL_RISK`: a dangerous capability appears with contextual risk indicators, but no complete exploit path is proven.
+- `CONFIRMED_VULNERABILITY`: source, sink, path, missing or ineffective control, and plausible impact are all evidenced.
+
+Examples:
+
+- `fetch()` alone is `OBSERVED_CAPABILITY`.
+- `fetch()` near sensitive data or untrusted input is `POTENTIAL_RISK`.
+- Sensitive data flowing to an uncontrolled external endpoint without an effective control is `CONFIRMED_VULNERABILITY`.
+
+Evidence determines classification.
 
 ## What It Checks
 
@@ -45,6 +63,8 @@ The report includes a production security gate, Top Risks, Trust Boundary Assess
 - TrustBoundary performs local, read-only cybersecurity and trust-boundary scanning.
 - TrustBoundary helps developers review repositories before production.
 - TrustBoundary does not certify that a repository is secure.
+- TrustBoundary is not a penetration-testing tool, runtime exploit framework, certification system, or guarantee of safety.
+- Dangerous primitives are not automatically vulnerabilities.
 - Findings are evidence-based review leads unless marked confirmed.
 
 ## Supported Usage
@@ -95,7 +115,7 @@ Skill usage:
 
 ## Limitations
 
-This is heuristic static scanning. It is not a full SAST platform, a penetration test, a dependency intelligence system, or a guarantee that code is safe. It can miss issues and it can produce false positives.
+This is heuristic static scanning. It is not a full SAST platform, a penetration test, a dependency intelligence system, a runtime exploit framework, or a guarantee that code is safe. It can miss issues and it can produce false positives.
 
 ## Release Readiness
 

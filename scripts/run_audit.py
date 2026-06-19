@@ -804,8 +804,6 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "controls_missing": finding.get("controls_missing"),
             "boundary_crossing": finding.get("boundary_crossing") or infra_confirmed,
             "proof_status": finding.get("proof_status"),
-            "finding_class": finding.get("finding_class"),
-            "evidence_level": finding.get("evidence_level"),
             "confidence_score": finding.get("confidence_score"),
             "confidence_band": finding.get("confidence_band"),
             "confidence_reason": finding.get("confidence_reason"),
