@@ -21,6 +21,60 @@ INJECTION_PHRASES = [
 
 BROAD_TOOLS = {"Bash", "WebFetch", "Write", "Execute"}
 
+
+def warn_parse(path, findings, message, confidence=25):
+    findings.append({
+        "category": "mcp_tool_abuse",
+        "rule": "unparsed_mcp_config",
+        "file": path,
+        "line": None,
+        "evidence_redacted": f"{Path(path).name}: {message}",
+        "base_confidence": confidence,
+    })
+
+
+def iter_config_items(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key, item
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield index, item
+
+
+def value_to_text(value):
+    if isinstance(value, (dict, list, str, int, float, bool)) or value is None:
+        return json.dumps(value)
+    return None
+
+
+def scan_config_value(path, findings, label, value):
+    text = value_to_text(value)
+    if text is None:
+        warn_parse(path, findings, f"unsupported item type {type(value).__name__}")
+        return
+    if isinstance(value, dict) and not value.get("version"):
+        findings.append({
+            "category": "mcp_tool_abuse", "rule": "unpinned_mcp_server_version",
+            "file": path, "line": None,
+            "evidence_redacted": str(label),
+            "base_confidence": 55,
+        })
+    for pat in INJECTION_PHRASES:
+        if re.search(pat, text, re.IGNORECASE):
+            findings.append({
+                "category": "mcp_tool_abuse", "rule": "suspicious_mcp_tool_description",
+                "file": path, "line": None,
+                "evidence_redacted": f"{label}: matched '{pat}'",
+                "base_confidence": 80,
+            })
+    if isinstance(value, dict):
+        for child_label, child in iter_config_items(value):
+            scan_config_value(path, findings, f"{label}.{child_label}", child)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            scan_config_value(path, findings, f"{label}[{index}]", item)
+
 def find_skill_files(repo_path):
     out = []
     for _, path in iter_repo_files(repo_path):
@@ -74,11 +128,16 @@ def scan_skill_md(path, findings):
 
 def scan_mcp_config(path, findings):
     try:
-        data = json.load(open(path))
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            data = json.load(handle)
     except Exception:
+        warn_parse(path, findings, "malformed JSON or unsupported config shape")
         return
     base = os.path.basename(path)
     if base == "package.json":
+        if not isinstance(data, dict):
+            warn_parse(path, findings, "package.json did not parse as an object")
+            return
         if not data.get("pi", {}).get("skills"):
             findings.append({
                 "category": "mcp_tool_abuse", "rule": "unscoped_bash_tool",
@@ -88,7 +147,13 @@ def scan_mcp_config(path, findings):
             })
         return
     if base == "plugin.json":
+        if not isinstance(data, dict):
+            warn_parse(path, findings, "plugin.json did not parse as an object")
+            return
         interface = data.get("interface", {})
+        if not isinstance(interface, dict):
+            warn_parse(path, findings, "plugin.json interface was not an object")
+            interface = {}
         for field in ("longDescription", "defaultPrompt"):
             value = interface.get(field)
             if isinstance(value, list):
@@ -103,24 +168,24 @@ def scan_mcp_config(path, findings):
                             "base_confidence": 70,
                         })
         return
-    servers = data.get("mcpServers", data.get("servers", {}))
-    for name, cfg in (servers or {}).items():
-        if isinstance(cfg, dict) and not cfg.get("version"):
-            findings.append({
-                "category": "mcp_tool_abuse", "rule": "unpinned_mcp_server_version",
-                "file": path, "line": None,
-                "evidence_redacted": name,
-                "base_confidence": 55,
-            })
-        desc = json.dumps(cfg)
-        for pat in INJECTION_PHRASES:
-            if re.search(pat, desc, re.IGNORECASE):
-                findings.append({
-                    "category": "mcp_tool_abuse", "rule": "suspicious_mcp_tool_description",
-                    "file": path, "line": None,
-                    "evidence_redacted": f"{name}: matched '{pat}'",
-                    "base_confidence": 80,
-                })
+    if isinstance(data, dict):
+        servers = data.get("mcpServers", data.get("servers", {}))
+    elif isinstance(data, list):
+        servers = data
+    else:
+        warn_parse(path, findings, f"unsupported top-level type {type(data).__name__}")
+        return
+
+    if isinstance(servers, dict):
+        items = iter_config_items(servers)
+    elif isinstance(servers, list):
+        items = ((f"[{index}]", item) for index, item in enumerate(servers))
+    else:
+        warn_parse(path, findings, f"unsupported servers type {type(servers).__name__}")
+        return
+
+    for name, cfg in items:
+        scan_config_value(path, findings, str(name), cfg)
 
 def walk(repo_path):
     findings = []

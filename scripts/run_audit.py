@@ -18,6 +18,7 @@ import json
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+import time
 import sys
 
 
@@ -142,6 +143,7 @@ def score_findings(raw_findings):
 
 def scan_repo(target_repo: Path, quiet: bool = False):
     all_findings = []
+    audit_warnings = []
     total = len(SCANNER_MODULES)
     labels = {
         "scan_secrets": "Scanning secrets",
@@ -154,10 +156,19 @@ def scan_repo(target_repo: Path, quiet: bool = False):
     for index, module_name in enumerate(SCANNER_MODULES, start=1):
         scanner = load_module(module_name)
         emit(f"[{index}/{total}] {labels.get(module_name, f'Scanning {module_name}') }...", quiet)
-        module_findings = scanner.walk(str(target_repo))
-        all_findings.extend(module_findings)
-        emit(f"[{index}/{total}] Done {labels.get(module_name, module_name)}.", quiet)
-    return all_findings
+        started = time.perf_counter()
+        try:
+            module_findings = scanner.walk(str(target_repo))
+            all_findings.extend(module_findings)
+        except Exception as exc:
+            audit_warnings.append({
+                "rule": "scanner_failed",
+                "scanner": module_name,
+                "message": str(exc),
+            })
+        elapsed = time.perf_counter() - started
+        emit(f"[{index}/{total}] Done {labels.get(module_name, module_name)}. {elapsed:.1f}s", quiet)
+    return all_findings, audit_warnings
 
 
 def risk_counts(findings):
@@ -451,6 +462,15 @@ def render_report(repo_path: Path, scored):
     return "\n".join(lines) + "\n"
 
 
+def render_audit_warnings(warnings):
+    if not warnings:
+        return ""
+    lines = ["## Audit Warnings"]
+    for warning in warnings:
+        lines.append(f"- {warning.get('rule', 'scanner_failed')} - {warning.get('scanner', '-')}: {warning.get('message', '-')}")
+    return "\n".join(lines) + "\n"
+
+
 def build_json_output(repo_path: Path, scored):
     findings = list(scored["findings"])
     counts = risk_counts(findings)
@@ -489,11 +509,11 @@ def build_json_output(repo_path: Path, scored):
     }
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", nargs="?", default=".")
     parser.add_argument("--quiet", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     target_repo = Path(args.repo).resolve()
     if not target_repo.exists():
@@ -501,20 +521,32 @@ def main():
         return 1
 
     try:
+        started = time.perf_counter()
         emit("Repository Trust Boundary Auditor", args.quiet)
         emit(f"Target: {target_repo}", args.quiet)
-        raw_findings = scan_repo(target_repo, args.quiet)
+        raw_findings, audit_warnings = scan_repo(target_repo, args.quiet)
         emit("Scoring findings...", args.quiet)
         scored = score_findings(raw_findings)
         findings_path = Path.cwd() / "security-audit-findings.json"
         report_path = Path.cwd() / "SECURITY_AUDIT_REPORT.md"
         emit("Generating reports...", args.quiet)
-        findings_path.write_text(json.dumps(build_json_output(target_repo, scored), indent=2), encoding="utf-8")
-        report_path.write_text(render_report(target_repo, scored), encoding="utf-8")
+        json_output = build_json_output(target_repo, scored)
+        if audit_warnings:
+            json_output["audit_warnings"] = audit_warnings
+            json_output["summary"]["scanner_failures"] = len(audit_warnings)
+        findings_path.write_text(json.dumps(json_output, indent=2), encoding="utf-8")
+        report = render_report(target_repo, scored)
+        warnings_block = render_audit_warnings(audit_warnings)
+        if warnings_block:
+            report += "\n" + warnings_block
+        report_path.write_text(report, encoding="utf-8")
         emit("")
         emit("Done.", args.quiet)
+        emit(f"Total elapsed: {time.perf_counter() - started:.1f}s", args.quiet)
         emit(f"Release Decision: {release_decision(scored['findings'])}", args.quiet)
         emit(f"Findings: {len(scored['findings'])}", args.quiet)
+        if audit_warnings:
+            emit(f"Audit warnings: {len(audit_warnings)}", args.quiet)
         emit(f"Report: {report_path.name}", args.quiet)
         emit(f"JSON: {findings_path.name}", args.quiet)
         return 0
