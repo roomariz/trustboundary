@@ -33,16 +33,18 @@ def typosquat_score(name, seed):
 
 def scan_package_json(path, findings):
     try:
-        data = json.load(open(path))
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            data = json.load(handle)
     except Exception:
         return
     for section in ("dependencies", "devDependencies"):
-        for name, version in data.get(section, {}).items():
-            if version.strip().startswith(("^", "~", "*", "latest")) or version.strip() == "":
+        for name, version in sorted(data.get(section, {}).items()):
+            version_text = str(version).strip()
+            if version_text.startswith(("^", "~", "*", "latest")) or version_text == "":
                 findings.append({
                     "category": "supply_chain", "rule": "unpinned_version",
                     "file": path, "line": None,
-                    "evidence_redacted": f"{name}@{version}",
+                    "evidence_redacted": f"{name}@{version_text}",
                     "base_confidence": 60,
                 })
             d = typosquat_score(name, POPULAR_NPM)
@@ -61,7 +63,7 @@ def scan_package_json(path, findings):
                     "base_confidence": 50,
                 })
     for hook in ("scripts",):
-        for k, v in data.get(hook, {}).items():
+        for k, v in sorted(data.get(hook, {}).items()):
             if k in ("postinstall", "preinstall", "install"):
                 findings.append({
                     "category": "malicious_packages", "rule": "install_time_script",
@@ -71,26 +73,27 @@ def scan_package_json(path, findings):
                 })
 
 def scan_requirements_txt(path, findings):
-    for lineno, line in enumerate(open(path, errors="ignore"), start=1):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "==" not in line and not line.startswith("-"):
-            findings.append({
-                "category": "supply_chain", "rule": "unpinned_version",
-                "file": path, "line": lineno,
-                "evidence_redacted": line,
-                "base_confidence": 60,
-            })
-        name = re.split(r"[=<>~!\[]", line)[0].strip()
-        d = typosquat_score(name, POPULAR_PY)
-        if 0 < d <= 2:
-            findings.append({
-                "category": "supply_chain", "rule": "possible_typosquat",
-                "file": path, "line": lineno,
-                "evidence_redacted": name,
-                "base_confidence": 45,
-            })
+    with open(path, encoding="utf-8", errors="ignore") as handle:
+        for lineno, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "==" not in line and not line.startswith("-"):
+                findings.append({
+                    "category": "supply_chain", "rule": "unpinned_version",
+                    "file": path, "line": lineno,
+                    "evidence_redacted": line,
+                    "base_confidence": 60,
+                })
+            name = re.split(r"[=<>~!\[]", line)[0].strip()
+            d = typosquat_score(name, POPULAR_PY)
+            if 0 < d <= 2:
+                findings.append({
+                    "category": "supply_chain", "rule": "possible_typosquat",
+                    "file": path, "line": lineno,
+                    "evidence_redacted": name,
+                    "base_confidence": 45,
+                })
 
 def walk(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None, ignore_patterns=()):
     findings = []
