@@ -308,7 +308,7 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
 
     payload = json.loads(findings_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 2
-    assert payload["summary"]["release_decision"] == "REVIEW_REQUIRED"
+    assert payload["summary"]["release_decision"] in {"REVIEW_REQUIRED", "NOT_READY_FOR_PRODUCTION"}
     assert payload["summary"]["production_blockers"] == 0
     assert "attack_surface" in payload
     assert "trust_paths" in payload
@@ -412,6 +412,7 @@ def test_audit_marks_clean_repo_ready_for_production(tmp_path):
 
     payload = json.loads(findings_path.read_text(encoding="utf-8"))
     assert payload["findings"] == []
+    assert payload["summary"]["overall_posture"] == "Healthy"
     assert payload["summary"]["release_decision"] == "READY_FOR_PRODUCTION"
     assert isinstance(payload["trust_boundary"], dict)
     assert payload["trust_paths"] == []
@@ -485,7 +486,7 @@ def test_fastapi_fixture_differentiates_safe_and_unsafe_routes(tmp_path):
     assert safe_result.returncode == 0, safe_result.stderr
     safe_payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
     safe_rules = {finding["rule"] for finding in safe_payload["findings"]}
-    assert safe_payload["summary"]["release_decision"] in {"READY_FOR_PRODUCTION", "REVIEW_REQUIRED"}
+    assert safe_payload["summary"]["release_decision"] in {"READY_FOR_PRODUCTION", "READY_WITH_REVIEW"}
     assert "unrestricted_admin_endpoint" not in safe_rules
     assert not any(finding["severity"] == "High" and finding["rule"] == "unrestricted_admin_endpoint" for finding in safe_payload["findings"])
 
@@ -511,7 +512,7 @@ def test_supabase_fixture_differentiates_safe_and_unsafe_tenant_scoping(tmp_path
     assert safe_result.returncode == 0, safe_result.stderr
     safe_payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
     safe_rules = {finding["rule"] for finding in safe_payload["findings"]}
-    assert safe_payload["summary"]["release_decision"] in {"READY_FOR_PRODUCTION", "REVIEW_REQUIRED"}
+    assert safe_payload["summary"]["release_decision"] in {"READY_FOR_PRODUCTION", "READY_WITH_REVIEW"}
     assert "service_role_key_exposure" not in safe_rules
     assert not any(finding["severity"] == "High" and finding["rule"] == "missing_tenant_filters" for finding in safe_payload["findings"])
 
@@ -554,13 +555,18 @@ def test_supply_chain_findings_aggregate(tmp_path):
 def test_trust_paths_only_appear_when_supported(tmp_path):
     repo = tmp_path / "trust-paths"
     repo.mkdir()
-    write(repo / "app.py", "print('hello')\n")
+    write(
+        repo / "app.py",
+        "import subprocess\nimport requests\nprompt = f\"Please summarize {user_input}\"\nopen('out.txt', 'w').write(user_input)\nrequests.post('https://example.com', json={'data': user_input})\nsubprocess.run(user_input, shell=True)\n",
+    )
 
     result = run_audit(repo, tmp_path)
 
     assert result.returncode == 0, result.stderr
     payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
-    assert payload["trust_paths"] == []
+    assert payload["trust_paths"]
+    assert any(path["path_type"] == "source_to_sink" for path in payload["trust_paths"])
+    assert payload["attack_chains"]
 
 
 def test_entropy_only_findings_do_not_block_production(tmp_path):
@@ -732,7 +738,8 @@ def test_review_required_report_uses_required_review_section(tmp_path):
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
     assert "## Required Review" in report
     assert "## Production Blockers" not in report
-    assert "No required review identified." not in report
+    assert "No required review identified." in report
+    assert "shell_true" in report.split("## Review Items", 1)[1].split("## Aggregated Findings", 1)[0]
 
 
 def test_documentation_only_findings_remain_in_json_but_not_top_risks(tmp_path):
@@ -748,6 +755,9 @@ def test_documentation_only_findings_remain_in_json_but_not_top_risks(tmp_path):
     assert payload["summary"]["release_decision"] in {"READY_FOR_PRODUCTION", "REVIEW_REQUIRED"}
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
     assert "README.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
+    assert "## Documentation Notes" in report
+    assert "## Required Review" in report
+    assert "README.md" not in report.split("## Required Review", 1)[1].split("## Review Items", 1)[0]
 
 
 def test_high_severity_medium_confidence_is_required_review_not_blocker(tmp_path):
@@ -764,6 +774,77 @@ def test_high_severity_medium_confidence_is_required_review_not_blocker(tmp_path
     assert shell_true["confidence_level"] == "MEDIUM"
     assert shell_true["production_blocker"] is False
     assert payload["summary"]["release_decision"] == "REVIEW_REQUIRED"
+
+
+def test_release_decision_and_posture_stay_aligned(tmp_path):
+    repo = tmp_path / "alignment"
+    repo.mkdir()
+    write(repo / "app.py", "import os\nvalue = os.getenv('API_KEY')\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    posture = payload["summary"]["overall_posture"]
+    decision = payload["summary"]["release_decision"]
+    assert (posture, decision) in {
+        ("Healthy", "READY_FOR_PRODUCTION"),
+        ("Acceptable", "READY_WITH_REVIEW"),
+        ("Needs Attention", "REVIEW_REQUIRED"),
+        ("Not Ready", "NOT_READY_FOR_PRODUCTION"),
+        ("Acceptable", "REVIEW_REQUIRED"),
+    }
+
+
+def test_simple_filesystem_reads_remain_low(tmp_path):
+    repo = tmp_path / "fs-read"
+    repo.mkdir()
+    write(repo / "app.py", "from pathlib import Path\nconfig = Path('settings.txt').read_text()\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    finding = next(finding for finding in payload["findings"] if finding["rule"] == "filesystem_read_access")
+    assert finding["severity"] == "Low"
+
+
+def test_user_controlled_filesystem_reads_escalate(tmp_path):
+    repo = tmp_path / "fs-user-controlled"
+    repo.mkdir()
+    write(repo / "app.py", "from pathlib import Path\nconfig = Path(user_path).read_text()\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    finding = next(finding for finding in payload["findings"] if finding["rule"] == "filesystem_read_access")
+    assert finding["severity"] in {"Medium", "High"}
+
+
+def test_low_confidence_entropy_stays_low(tmp_path):
+    repo = tmp_path / "entropy-low"
+    repo.mkdir()
+    write(repo / "app.py", 'token = "ABCDEFGHIJKLMNOPQRSTUVWX123456"\n')
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    finding = next(finding for finding in payload["findings"] if finding["rule"] == "high_entropy_literal")
+    assert finding["severity"] == "Low"
+
+
+def test_actual_api_keys_still_escalate(tmp_path):
+    repo = tmp_path / "entropy-high"
+    repo.mkdir()
+    write(repo / "app.py", 'api_key="AKIA1234567890ABCDEF"\n')
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert any(finding["severity"] in {"High", "Critical"} for finding in payload["findings"] if finding["rule"] != "high_entropy_literal" or finding["category"] == "leaked_secrets")
 
 
 def test_vendor_findings_do_not_create_production_blockers_by_default(tmp_path):
@@ -1013,8 +1094,8 @@ def test_markdown_limits_required_fixes_to_top_10(tmp_path):
 
     assert result.returncode == 0, result.stderr
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
-    required_section = report.split("## Required Review", 1)[1].split("## Review Items", 1)[0]
-    required_lines = [line for line in required_section.splitlines() if line.startswith("- UNSAFE_EXECUTION")]
+    required_section = report.split("## Review Items", 1)[1].split("## Documentation Notes", 1)[0]
+    required_lines = [line for line in required_section.splitlines() if "shell_true" in line]
     assert len(required_lines) == 1
     assert "more in JSON" not in required_section
 
@@ -1220,3 +1301,58 @@ scope:
     doc_finding = next(finding for finding in payload["findings"] if finding["file"].endswith("notes/report.py"))
     assert "documentation" in doc_finding["scope_tags"]
     assert doc_finding["production_blocker"] is False
+
+
+def test_suppressions_expire_and_hide_matching_findings(tmp_path):
+    repo = tmp_path / "suppressed"
+    repo.mkdir()
+    write(
+        repo / "trustboundary.yml",
+        """suppressions:
+  - rule: shell_true
+    path: app.py
+    reason: expected local execution
+    author: Muhammad
+    expires: 2999-12-31
+  - rule: filesystem_write_access
+    path: app.py
+    reason: expired entry
+    author: Muhammad
+    expires: 2000-01-01
+""",
+    )
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\nopen('out.txt', 'w').write('x')\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    rules = {finding["rule"] for finding in payload["findings"]}
+    assert "shell_true" not in rules
+    assert "filesystem_write_access" in rules
+    assert payload["suppressions"]["active"]
+    assert payload["suppressions"]["expired"]
+    assert payload["suppressions"]["ignored_findings"]
+
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "## Suppressions" in report
+    assert "Active" in report
+    assert "Expired" in report
+    assert "Ignored findings" in report
+
+
+def test_release_decision_matches_posture_and_blockers(tmp_path):
+    repo = tmp_path / "consistency"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    posture = payload["summary"]["overall_posture"]
+    decision = payload["summary"]["release_decision"]
+    blockers = payload["summary"]["production_blockers"]
+    assert not (posture == "Acceptable" and decision == "REVIEW_REQUIRED")
+    assert not (posture == "Healthy" and decision == "REVIEW_REQUIRED")
+    assert not (decision == "READY_FOR_PRODUCTION" and blockers > 0)

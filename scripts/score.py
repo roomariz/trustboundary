@@ -22,7 +22,7 @@ SEVERITY_BY_RULE = {
     "github_token": "High",
     "slack_token": "High",
     "generic_secret_assignment": "High",
-    "high_entropy_literal": "Medium",
+    "high_entropy_literal": "Low",
     "high_entropy_lockfile_literal": "Low",
     "install_time_script": "High",
     "possible_typosquat": "High",
@@ -100,6 +100,28 @@ def adjust_confidence(finding):
     if finding.get("category") == "prompt_injection":
         score = min(score, 70)
     return max(0, min(100, score))
+
+
+def severity_for_finding(finding):
+    severity = SEVERITY_BY_RULE.get(finding["rule"], "Medium")
+    confidence = finding.get("base_confidence", 40)
+    path = (finding.get("file") or "").lower()
+    evidence = (finding.get("evidence_redacted") or finding.get("evidence") or "").lower()
+
+    if finding["rule"] == "high_entropy_literal":
+        return "Low" if confidence <= 24 else severity
+
+    if finding["rule"] == "filesystem_read_access":
+        if confidence >= 80 or any(
+            marker in path or marker in evidence
+            for marker in ("../", "..\\", "/etc/", "\\windows\\", "id_rsa", "passwd", "shadow", ".env", "credentials", "secret")
+        ):
+            return "High"
+        if any(marker in path or marker in evidence for marker in ("user", "input", "args", "request", "query", "param", "filename", "filepath")):
+            return "Medium"
+        return "Low"
+
+    return severity
 
 
 def _location_key(finding):
@@ -205,7 +227,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         scope_tags = path_scope_tags(Path(finding.get("file") or ""))
         scope = scope_tags[0]
         confidence = adjust_confidence(finding)
-        severity = SEVERITY_BY_RULE.get(finding["rule"], "Medium")
+        severity = severity_for_finding(finding)
         row = {
             "id": f"{finding['category'].upper()}-{next(counter):04d}",
             "category": finding["category"],

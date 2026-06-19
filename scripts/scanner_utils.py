@@ -150,6 +150,7 @@ def load_trustboundary_config(repo_path: Path) -> ScanConfig:
     current_key: str | None = None
     current_list: list[Any] | None = None
     current_scope: str | None = None
+    current_item: dict[str, Any] | None = None
     for raw_line in text.splitlines():
         line = _strip_yaml_comment(raw_line.rstrip())
         stripped = line.strip()
@@ -157,11 +158,20 @@ def load_trustboundary_config(repo_path: Path) -> ScanConfig:
             continue
         indent = len(line) - len(line.lstrip(" "))
         if stripped.startswith("- ") and current_list is not None:
-            current_list.append(_coerce_scalar(stripped[2:]))
+            value = stripped[2:]
+            if current_key == "suppressions":
+                current_item = {}
+                current_list.append(current_item)
+                if value and ":" in value:
+                    key, item_value = value.split(":", 1)
+                    current_item[key.strip()] = _coerce_scalar(item_value)
+                continue
+            current_list.append(_coerce_scalar(value))
             continue
         if indent == 0 and stripped.endswith(":"):
             current_key = stripped[:-1]
             current_scope = None
+            current_item = None
             if current_key in {"exclusions", "ignore", "enabled_scanners", "suppressions"}:
                 current_list = []
                 data[current_key] = current_list
@@ -179,12 +189,17 @@ def load_trustboundary_config(repo_path: Path) -> ScanConfig:
             if current_scope and indent >= 4 and stripped.startswith("- "):
                 data.setdefault("scope_rules", {}).setdefault(current_scope, []).append(_coerce_scalar(stripped[2:]))
                 continue
+        if current_key == "suppressions" and current_item is not None and ":" in line and indent >= 2:
+            key, value = line.split(":", 1)
+            current_item[key.strip()] = _coerce_scalar(value)
+            continue
         if ":" in line:
             key, value = line.split(":", 1)
             key = key.strip()
             value = value.strip()
             current_key = key
             current_scope = None
+            current_item = None
             if not value:
                 current_list = []
                 data[key] = current_list

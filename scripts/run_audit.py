@@ -110,6 +110,8 @@ ICON_WARNING = "!"
 ICON_ERROR = "x"
 ICON_INFO = "i"
 
+SUPPRESSION_FIELDS = ("rule", "path", "reason", "author", "expires")
+
 ANSI_RESET = "\x1b[0m"
 ANSI_GREEN = "\x1b[32m"
 ANSI_YELLOW = "\x1b[33m"
@@ -162,6 +164,63 @@ def emit(message: str, quiet: bool = False):
         print(message)
 
 
+def _parse_date(value: str):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _suppression_is_expired(suppression):
+    expires = suppression.get("expires")
+    expiry = _parse_date(str(expires)) if expires else None
+    return expiry is None or expiry < datetime.now().date()
+
+
+def _suppression_matches(finding, suppression):
+    rule = str(suppression.get("rule") or "")
+    path = str(suppression.get("path") or "")
+    finding_rule = finding.get("rule") or finding.get("rule_id")
+    if rule and rule != finding_rule:
+        return False
+    finding_path = str(finding.get("file") or "")
+    if path and not Path(finding_path).match(path):
+        return False
+    return True
+
+
+def apply_suppressions(findings, suppressions):
+    active = []
+    expired = []
+    ignored = []
+    for suppression in suppressions or ():
+        if not all(str(suppression.get(field) or "").strip() for field in SUPPRESSION_FIELDS):
+            expired.append({**suppression, "status": "invalid", "reason": suppression.get("reason") or "Missing required suppression fields"})
+            continue
+        bucket = expired if _suppression_is_expired(suppression) else active
+        bucket.append({**suppression, "status": "expired" if bucket is expired else "active"})
+
+    kept = []
+    for finding in findings:
+        matched = next((suppression for suppression in active if _suppression_matches(finding, suppression)), None)
+        if matched:
+            ignored.append({**finding, "suppressed_by": matched})
+            continue
+        kept.append(finding)
+    return kept, active, expired, ignored
+
+
+def _finding_evidence_summary(finding):
+    snippet = finding.get("evidence_snippet") or finding.get("evidence_redacted") or "-"
+    return {
+        "why_detected": finding.get("evidence_snippet") or finding.get("evidence_redacted") or "Pattern matched by scanner heuristic.",
+        "impacted_trust_boundary": finding.get("trust_boundary", ["unknown"]),
+        "confidence_bucket": finding.get("confidence_bucket") or "Unknown",
+        "remediation": finding.get("recommendation"),
+        "evidence_snippet": snippet,
+    }
+
+
 def score_findings(raw_findings, include_dependencies: bool = False, include_tests: bool = False, repo_config=None):
     score_module = load_module("score")
     scored = score_module.score_findings(raw_findings, include_dependencies=include_dependencies, include_tests=include_tests)
@@ -188,6 +247,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "remediation_priority": REMEDIATION_PRIORITY.get(finding["severity"], "RECOMMENDED"),
             "trust_boundary": metadata.get("trust_boundary", ["unknown"]),
             "production_blocker": production_blocker,
+            **_finding_evidence_summary(finding),
         })
     return {"findings": findings, "correlations": scored["correlations"]}
 
@@ -261,25 +321,46 @@ def risk_counts(findings):
 
 
 def posture_label(counts):
-    if counts["Critical"]:
-        return "Critical"
-    if counts["High"]:
-        return "Needs Attention"
+    if counts["Critical"] or counts["High"]:
+        return "Not Ready"
     if counts["Medium"]:
+        return "Needs Attention"
+    if counts["Low"] or counts["Info"]:
         return "Acceptable"
-    return "Strong"
+    return "Healthy"
+
+
+def is_documentation_finding(finding):
+    scope_tags = set(finding.get("scope_tags", []))
+    return "documentation" in scope_tags and finding.get("category") not in {"leaked_secrets"} and finding.get("severity") != "Critical"
+
+
+def decision_inputs(findings):
+    production_findings = [finding for finding in findings if not is_documentation_finding(finding)]
+    blockers = [
+        finding
+        for finding in production_findings
+        if finding.get("production_blocker")
+        or finding.get("severity") == "Critical"
+    ]
+    review_items = [
+        finding
+        for finding in production_findings
+        if finding not in blockers and (finding.get("severity") in {"High", "Medium"} or finding.get("remediation_priority") == "RECOMMENDED")
+    ]
+    return production_findings, blockers, review_items
 
 
 def release_decision(findings, audit_warnings=None):
-    production_findings = [finding for finding in findings if _should_count_for_production_signal(finding)]
+    production_findings, blockers, review_items = decision_inputs(findings)
     if audit_warnings:
         return "REVIEW_REQUIRED"
-    if any(f.get("production_blocker") for f in production_findings):
+    if blockers:
         return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("severity") == "Medium" or (f.get("severity") == "High" and f.get("confidence_level") != BLOCKING_CONFIDENCE) for f in production_findings):
+    if review_items:
         return "REVIEW_REQUIRED"
-    if any(f.get("category") in {"prompt_injection", "mcp_tool_abuse", "data_exfiltration", "framework_security"} for f in production_findings):
-        return "REVIEW_REQUIRED"
+    if production_findings:
+        return "READY_WITH_REVIEW"
     return "READY_FOR_PRODUCTION"
 
 
@@ -340,43 +421,83 @@ def top_risks(findings, repo_config=None):
 
 
 def trust_paths(findings):
+    sources = {
+        "user_input": [f for f in findings if f["category"] == "prompt_injection" or f["rule"] in {"raw_prompt_concatenation", "direct_user_input_in_prompt", "missing_instruction_separation"}],
+        "prompt_input": [f for f in findings if f["category"] == "prompt_injection"],
+        "environment_variable": [f for f in findings if f["rule"] in {"environment_variable_access", "credential_env_passthrough"}],
+        "file_input": [f for f in findings if f["rule"] in {"filesystem_read_access", "recursive_filesystem_operation"}],
+        "retrieval_output": [f for f in findings if f["category"] == "data_exfiltration"],
+        "mcp_input": [f for f in findings if f["category"] == "mcp_tool_abuse"],
+    }
+    sinks = {
+        "subprocess": [f for f in findings if f["rule"] in {"shell_true", "exec_call", "os_system", "child_process_exec", "string_concat_into_shell"}],
+        "filesystem": [f for f in findings if f["rule"] in {"filesystem_write_access", "filesystem_delete_access"} or f["category"] == "framework_security" and f["rule"] in {"missing_tenant_filters", "unsafe_state_mutation"}],
+        "network": [f for f in findings if f["category"] == "data_exfiltration"],
+        "credentials": [f for f in findings if f["category"] == "leaked_secrets"],
+    }
     paths = []
-    has_prompt = [f for f in findings if f["category"] == "prompt_injection"]
-    has_tool = [f for f in findings if f["category"] == "mcp_tool_abuse"]
-    has_exec = [f for f in findings if f["category"] == "unsafe_execution"]
-    has_exfil = [f for f in findings if f["category"] == "data_exfiltration"]
-    if has_prompt and has_tool and has_exec:
+    combos = [
+        ("User Input", "subprocess(shell=True)", "High", "User input can reach shell execution through unsafe execution patterns.", "user_input", "subprocess"),
+        ("Prompt Input", "filesystem write", "Medium", "Prompt-controlled data can reach filesystem writes or state mutation.", "prompt_input", "filesystem"),
+        ("Environment Variable", "outbound request", "Medium", "Environment values can flow into network requests or exfiltration sinks.", "environment_variable", "network"),
+        ("Retrieval Output", "network request", "High", "Retrieved data can be reused in outbound requests.", "retrieval_output", "network"),
+        ("MCP Input", "filesystem write", "Medium", "Tool-controlled input can reach filesystem writes.", "mcp_input", "filesystem"),
+        ("File Input", "subprocess", "Medium", "File-controlled data may be reused in execution paths.", "file_input", "subprocess"),
+    ]
+    for source_label, sink_label, risk, summary, source_key, sink_key in combos:
+        if sources.get(source_key) and sinks.get(sink_key):
+            paths.append({
+                "path_type": "source_to_sink",
+                "source": source_label,
+                "sink": sink_label,
+                "risk": risk,
+                "confidence": "Medium",
+                "evidence": [sources[source_key][0]["id"], sinks[sink_key][0]["id"]],
+                "data_flow_summary": summary,
+            })
+    if any(f["category"] == "framework_security" for f in findings):
         paths.append({
-            "name": "Prompt-to-Shell",
-            "evidence": [has_prompt[0]["id"], has_tool[0]["id"], has_exec[0]["id"]],
-            "confidence": "Medium",
-            "data_flow_summary": "Untrusted input can move from prompt construction into a tool call and reach shell execution.",
-        })
-    if has_exfil:
-        paths.append({
-            "name": "Retrieval-to-External-Request",
-            "evidence": [has_exfil[0]["id"]],
-            "confidence": "Medium",
-            "data_flow_summary": "Repository code may pass retrieved or user-controlled data into outbound requests.",
-        })
-    framework_findings = [f for f in findings if f["category"] == "framework_security"]
-    if framework_findings:
-        paths.append({
-            "name": "Framework Surface",
-            "evidence": [framework_findings[0]["id"]],
+            "path_type": "source_to_sink",
+            "source": "Framework Entry Point",
+            "sink": "Privileged Tool or Route",
+            "risk": "Low",
             "confidence": "Low",
-            "data_flow_summary": "Framework-specific entry points may lack the expected authentication, tenant, or tool validation.",
+            "evidence": [f["id"] for f in findings if f["category"] == "framework_security"][:2],
+            "data_flow_summary": "Framework-specific entry points may lack authentication, tenant, or tool validation.",
         })
     return paths
 
 
+def attack_chains(trust_paths_items):
+    chains = []
+    has_prompt = any(path["source"] == "Prompt Input" for path in trust_paths_items)
+    has_tool = any(path["source"] == "MCP Input" or path["sink"] == "filesystem write" for path in trust_paths_items)
+    has_shell = any("subprocess" in path["sink"] for path in trust_paths_items)
+    has_network = any(path["sink"] == "network request" or path["sink"] == "outbound request" for path in trust_paths_items)
+    if has_prompt and has_tool and has_shell and has_network:
+        chains.append({
+            "name": "Prompt -> Tool -> Shell -> Network",
+            "risk": "Critical",
+            "reason": "Prompt-controlled data reaches command execution and outbound communication.",
+        })
+    elif has_prompt and has_shell:
+        chains.append({
+            "name": "Prompt -> Shell",
+            "risk": "High",
+            "reason": "Prompt-controlled data reaches shell execution.",
+        })
+    return chains
+
+
 def required_fixes(findings):
-    items = [f for f in findings if f.get("remediation_priority") == "REQUIRED" or f.get("production_blocker")]
+    _, blockers, _ = decision_inputs(findings)
+    items = blockers
     return sorted(items, key=severity_sort_key)
 
 
 def recommended_fixes(findings):
-    items = [f for f in findings if f.get("remediation_priority") in {"RECOMMENDED", "OPTIONAL"}]
+    _, blockers, review_items = decision_inputs(findings)
+    items = review_items
     return sorted(items, key=severity_sort_key)
 
 
@@ -396,11 +517,14 @@ def format_location(finding):
 
 def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None):
     findings = sorted(scored["findings"], key=severity_sort_key)
+    suppressions = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
+    findings, active_suppressions, expired_suppressions, ignored_findings = suppressions
     counts = risk_counts(findings)
     decision = release_decision(findings, audit_warnings=audit_warnings)
     trust_profile = boundary_summary(findings)
     attack_surface = attack_surface_summary(findings)
     paths = trust_paths(findings)
+    chains = attack_chains(paths)
     required = required_fixes(findings)
     recommended = recommended_fixes(findings)
     framework_items = framework_findings(findings)
@@ -411,8 +535,12 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         required_reason = "One or more scanners failed, so the audit is incomplete and requires manual review"
     elif decision == "NOT_READY_FOR_PRODUCTION":
         required_reason = "Critical finding or High finding with high confidence requires production blocking remediation"
-    else:
+    elif decision == "REVIEW_REQUIRED":
         required_reason = "High severity or unresolved trust-boundary risk requires review"
+    elif decision == "READY_WITH_REVIEW":
+        required_reason = "Findings exist, but none meet the production blocker threshold"
+    else:
+        required_reason = "No blockers or unresolved trust-boundary risks were found"
     lines = [
         f"# Repo Security Audit - {repo_path.name or repo_path} - {datetime.now().date().isoformat()}",
         "",
@@ -425,7 +553,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         "",
         "## Release Decision",
         f"- {decision}",
-        f"- Reason: {required_reason if decision != 'READY_FOR_PRODUCTION' else 'No blockers or unresolved trust-boundary risks were found'}",
+        f"- Reason: {required_reason}",
         "",
         "## Top Risks",
     ]
@@ -442,13 +570,23 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     if paths:
         for path in paths:
             lines.extend([
-                f"- **{path['name']}**",
+                f"- **{path['source']} -> {path['sink']}**",
                 f"  - Evidence: {', '.join(path['evidence'])}",
                 f"  - Confidence: {path['confidence']}",
                 f"  - Data flow: {path['data_flow_summary']}",
             ])
     else:
         lines.append("- No supported trust paths were inferred.")
+
+    lines.extend([
+        "",
+        "## Attack Chains",
+    ])
+    if chains:
+        for chain in chains:
+            lines.append(f"- **{chain['name']}** ({chain['risk']}) - {chain['reason']}")
+    else:
+        lines.append("- No attack chains inferred.")
 
     lines.extend([
         "",
@@ -472,11 +610,41 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     else:
         lines.append("No review items identified.")
 
+    documentation_notes = [finding for finding in findings if is_documentation_finding(finding)]
+    lines.extend([
+        "",
+        "## Documentation Notes",
+    ])
+    if documentation_notes:
+        for finding in documentation_notes[:10]:
+            lines.append(f"- {finding['id']} ({finding['severity']}, {finding['confidence_level']}) {finding['rule']} - {finding.get('recommendation')}")
+    else:
+        lines.append("No documentation notes identified.")
+
+    lines.extend([
+        "",
+        "## Suppressions",
+    ])
+    if active_suppressions:
+        lines.append("Active")
+        for suppression in active_suppressions:
+            lines.append(f"- {suppression['rule']} | {suppression['path']} | {suppression['reason']} | {suppression['author']} | {suppression['expires']}")
+    else:
+        lines.append("No active suppressions.")
+    if expired_suppressions:
+        lines.append("Expired")
+        for suppression in expired_suppressions:
+            lines.append(f"- {suppression['rule']} | {suppression['path']} | {suppression['reason']} | {suppression['author']} | {suppression['expires']}")
+    if ignored_findings:
+        lines.append("Ignored findings")
+        for finding in ignored_findings[:10]:
+            lines.append(f"- {finding['id']} ({finding['severity']}, {finding['confidence_level']}) {finding['rule']} - suppressed")
+
     lines.extend([
         "",
         "## Aggregated Findings",
     ])
-    high_critical = [f for f in findings if f["severity"] in {"Critical", "High"}]
+    high_critical = [f for f in findings if f["severity"] in {"Critical", "High"} and not is_documentation_finding(f)]
     medium = [f for f in findings if f["severity"] == "Medium"][:10]
     low = [f for f in findings if f["severity"] == "Low"]
     for finding in high_critical + medium:
@@ -567,6 +735,7 @@ def render_audit_warnings(warnings):
 
 def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None):
     findings = list(scored["findings"])
+    findings, active_suppressions, expired_suppressions, ignored_findings = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
     counts = risk_counts(findings)
     decision = release_decision(findings, audit_warnings=audit_warnings)
     surface = attack_surface_summary(findings)
@@ -590,11 +759,17 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
             "scanner_failures": len(audit_warnings or []),
             "scope_counts": scope_counts,
         },
+        "suppressions": {
+            "active": active_suppressions,
+            "expired": expired_suppressions,
+            "ignored_findings": ignored_findings,
+        },
         "scope": scope_summary,
         "trust_boundary": boundary_summary(findings),
         "top_risks": top_risks(findings, repo_config=repo_config),
         "attack_surface": surface,
         "trust_paths": trust_paths(findings),
+        "attack_chains": attack_chains(trust_paths(findings)),
         "framework_specific_findings": [
             {
                 "id": finding["id"],
@@ -684,7 +859,7 @@ def main(argv=None):
         emit(f"Files scanned: {scope_summary['files_scanned']}", args.quiet)
         emit(f"Files skipped: {scope_summary['files_skipped']}", args.quiet)
         decision = release_decision(scored["findings"], audit_warnings=audit_warnings)
-        decision_kind = "success" if decision == "READY_FOR_PRODUCTION" else "warning" if decision == "REVIEW_REQUIRED" else "error"
+        decision_kind = "success" if decision in {"READY_FOR_PRODUCTION", "READY_WITH_REVIEW"} else "warning" if decision == "REVIEW_REQUIRED" else "error"
         log_line(f"Release Decision: {decision}", kind=decision_kind, quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         emit(f"Findings: {len(scored['findings'])}", args.quiet)
         if audit_warnings:
