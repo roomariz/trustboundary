@@ -24,6 +24,7 @@ The report includes a production security gate, Top Risks, Trust Boundary Assess
 
 - `security-audit-findings.json`
 - `SECURITY_AUDIT_REPORT.md`
+- `security-audit-findings.sarif` when `--sarif` is used
 
 ## Supported Usage
 
@@ -46,6 +47,19 @@ OpenCode command:
 ```text
 repo-security-audit .
 ```
+
+GitHub Actions:
+
+```yaml
+- uses: actions/checkout@v4
+- uses: actions/setup-node@v4
+  with:
+    node-version: "20"
+- run: npm install
+- run: npx trustboundary scan . --sarif
+```
+
+The repository includes a ready-to-use workflow at `.github/workflows/trustboundary.yml` that runs the scan and uploads the Markdown, JSON, and SARIF outputs as artifacts. If the repository grants `security-events: write`, the workflow also uploads SARIF to GitHub code scanning on push.
 
 Skill usage:
 
