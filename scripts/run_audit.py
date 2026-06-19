@@ -299,11 +299,12 @@ def attack_surface_summary(findings):
     }
 
 
-def top_risks(findings):
+def top_risks(findings, repo_config=None):
     eligible = [
         finding
         for finding in findings
-        if finding.get("scope", "production") == "production" or finding.get("category") in {"leaked_secrets"}
+        if "documentation" not in path_scope_tags(Path(finding.get("file") or ""), repo_config)
+        or finding.get("category") in {"leaked_secrets"}
     ]
     return sorted(
         eligible,
@@ -372,20 +373,25 @@ def format_location(finding):
     return finding["file"] or "-"
 
 
-def render_report(repo_path: Path, scored, scope_summary):
+def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None):
     findings = sorted(scored["findings"], key=severity_sort_key)
     counts = risk_counts(findings)
-    decision = release_decision(findings)
+    decision = release_decision(findings, audit_warnings=audit_warnings)
     trust_profile = boundary_summary(findings)
     attack_surface = attack_surface_summary(findings)
     paths = trust_paths(findings)
     required = required_fixes(findings)
     recommended = recommended_fixes(findings)
     framework_items = framework_findings(findings)
-    risks = top_risks(findings)
+    risks = top_risks(findings, repo_config=repo_config)
 
     blocker_label = "Production Blockers" if decision == "NOT_READY_FOR_PRODUCTION" else "Required Review"
-    required_reason = "Critical finding or High finding with high confidence requires production blocking remediation" if decision == "NOT_READY_FOR_PRODUCTION" else "High severity or unresolved trust-boundary risk requires review"
+    if audit_warnings:
+        required_reason = "One or more scanners failed, so the audit is incomplete and requires manual review"
+    elif decision == "NOT_READY_FOR_PRODUCTION":
+        required_reason = "Critical finding or High finding with high confidence requires production blocking remediation"
+    else:
+        required_reason = "High severity or unresolved trust-boundary risk requires review"
     lines = [
         f"# Repo Security Audit - {repo_path.name or repo_path} - {datetime.now().date().isoformat()}",
         "",
@@ -394,6 +400,7 @@ def render_report(repo_path: Path, scored, scope_summary):
         f"- Overall posture: {posture_label(counts)}",
         f"- Release decision: {decision}",
         "- Network verification pass: skipped (offline scanner only)",
+        f"- Scanner failures: {len(audit_warnings or [])}",
         "",
         "## Release Decision",
         f"- {decision}",

@@ -35,7 +35,7 @@ def warn_parse(path, findings, message, confidence=25):
 
 def iter_config_items(value):
     if isinstance(value, dict):
-        for key, item in value.items():
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
             yield key, item
     elif isinstance(value, list):
         for index, item in enumerate(value):
@@ -82,7 +82,7 @@ def find_skill_files(repo_path, include_tests: bool = False, include_dependencie
             continue
         if path.name == "SKILL.md":
             out.append(str(path))
-    return out
+    return sorted(out)
 
 def find_mcp_configs(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None, ignore_patterns=()):
     out = []
@@ -95,7 +95,7 @@ def find_mcp_configs(repo_path, include_tests: bool = False, include_dependencie
             out.append(str(path))
         if fn.endswith(".toml") and "command" in root.lower():
             out.append(str(path))
-    return out
+    return sorted(set(out))
 
 def scan_skill_md(path, findings):
     text = open(path, errors="ignore").read()
