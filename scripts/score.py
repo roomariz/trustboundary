@@ -75,6 +75,12 @@ SEVERITY_BY_RULE = {
     "tool_abuse_instruction": "High",
     "prompt_extraction": "High",
     "hidden_instruction": "Medium",
+    "retrieval_prompt_injection": "High",
+    "retrieval_tool_instructions": "High",
+    "retrieval_hidden_instruction": "Medium",
+    "retrieval_policy_violation": "High",
+    "untrusted_retrieval_ingestion": "High",
+    "persistent_poisoned_context": "Medium",
 }
 
 LOW_CONTEXT_TAGS = ["test", "fixture", "example", "sample", "mock"]
@@ -148,6 +154,8 @@ def adjust_confidence(finding):
         score = min(score, 70)
     if finding.get("category") == "agentic_security":
         score = min(score, 85)
+    if finding.get("category") == "retrieval_poisoning":
+        score = min(score, 90)
     return max(0, min(100, score))
 
 
@@ -201,6 +209,11 @@ def severity_for_finding(finding):
 
     if finding["category"] == "agentic_security":
         if finding["rule"] in {"prompt_override", "role_manipulation", "tool_abuse_instruction", "prompt_extraction"}:
+            return "High"
+        return "Medium"
+
+    if finding["category"] == "retrieval_poisoning":
+        if finding["rule"] in {"retrieval_prompt_injection", "retrieval_tool_instructions", "retrieval_policy_violation", "untrusted_retrieval_ingestion"}:
             return "High"
         return "Medium"
 

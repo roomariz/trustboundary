@@ -32,6 +32,7 @@ SCANNER_MODULES = [
     "scan_exec_patterns",
     "scan_exfil_patterns",
     "scan_prompt_injection",
+    "scan_retrieval_poisoning",
     "scan_skills_and_mcp",
     "scan_frameworks",
 ]
@@ -86,6 +87,11 @@ CATEGORY_METADATA = {
         "impact": "Repository content may instruct an agent to override prompts, abuse tools, or extract hidden context.",
         "recommendation": "Treat prompt-bearing content as untrusted data, quote it explicitly, and separate instructions from inputs.",
         "trust_boundary": ["agent", "prompt"],
+    },
+    "retrieval_poisoning": {
+        "impact": "Retrieved corpus content may alter agent behavior, inject instructions, or poison downstream prompts and tools.",
+        "recommendation": "Treat retrieved content as untrusted data, validate ingestion sources, and isolate persistent prompt/context files.",
+        "trust_boundary": ["retrieval", "prompt", "agent"],
     },
     "framework_security": {
         "impact": "Framework configuration may expose routes, tools, or data without the expected guardrails.",
@@ -232,6 +238,8 @@ def _path_classes(finding):
     sink_class = None
     if finding["category"] in {"prompt_injection", "agentic_security"} or finding["rule"] in {"raw_prompt_concatenation", "direct_user_input_in_prompt", "missing_instruction_separation", "unsafe_prompt_construction"}:
         source_class = "prompt"
+    elif finding["category"] == "retrieval_poisoning":
+        source_class = "retrieval"
     elif finding["rule"] in {"environment_variable_access", "credential_env_passthrough"}:
         source_class = "environment"
     elif finding["rule"] in {"filesystem_read_access", "recursive_filesystem_operation"}:
@@ -245,7 +253,7 @@ def _path_classes(finding):
         sink_class = "execution"
     elif finding["rule"] in {"filesystem_write_access", "filesystem_delete_access"} or finding["category"] == "framework_security" and finding["rule"] in {"missing_tenant_filters", "unsafe_state_mutation"}:
         sink_class = "filesystem"
-    elif finding["category"] == "data_exfiltration" or finding["rule"] == "unrestricted_network_tool":
+    elif finding["category"] in {"data_exfiltration", "retrieval_poisoning"} or finding["rule"] == "unrestricted_network_tool":
         sink_class = "network"
     elif finding["category"] == "leaked_secrets" or finding["rule"] in {"high_entropy_literal", "mcp_env_credentials_exposure"}:
         sink_class = "credential"
@@ -265,6 +273,9 @@ def _trust_boundary_label(source_class: str, sink_class: str) -> str:
         ("file", "execution"): "File -> Execution",
         ("file", "network"): "File -> Network",
         ("retrieval", "network"): "Retrieval -> Network",
+        ("retrieval", "prompt"): "Retrieval -> Prompt",
+        ("retrieval", "tool"): "Retrieval -> Tool",
+        ("retrieval", "execution"): "Retrieval -> Execution",
         ("tool", "execution"): "Tool -> Execution",
         ("tool", "filesystem"): "Tool -> Filesystem",
         ("tool", "credential"): "Tool -> Credential",
@@ -514,6 +525,9 @@ def trust_paths(findings):
         ("file", "execution", "Medium", "File-controlled data can reach execution sinks."),
         ("file", "network", "Medium", "File-controlled data can reach outbound requests."),
         ("retrieval", "network", "High", "Retrieved content can be reused in network requests."),
+        ("retrieval", "prompt", "High", "Retrieved content can influence prompt construction."),
+        ("retrieval", "tool", "High", "Retrieved content can influence tool use."),
+        ("retrieval", "execution", "High", "Retrieved content can influence execution paths."),
         ("tool", "execution", "High", "Tool-originated input can reach execution sinks."),
         ("tool", "filesystem", "Medium", "Tool-originated input can reach filesystem mutation."),
         ("tool", "credential", "High", "Tool-originated input can reach credential exposure."),
@@ -609,6 +623,75 @@ def trust_paths(findings):
                 }
             ],
             "data_flow_summary": "Prompt-like instructions can be treated as privileged action requests.",
+        })
+    retrieval_poisoning_findings = [f for f in findings if f.get("category") == "retrieval_poisoning"]
+    if retrieval_poisoning_findings:
+        source_item = retrieval_poisoning_findings[0]
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if len({f.get("file") for f in retrieval_poisoning_findings if f.get("file")}) == 1 else "cross_file",
+            "boundary": "Retrieval -> Prompt",
+            "source": "Retrieved Content",
+            "source_class": "retrieval",
+            "sink": "Prompt Sink",
+            "sink_class": "prompt",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in retrieval_poisoning_findings) else "Medium",
+            "confidence_score": 89,
+            "evidence": [source_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                }
+            ],
+            "data_flow_summary": "Retrieved corpus content can influence prompt construction.",
+        })
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if len({f.get("file") for f in retrieval_poisoning_findings if f.get("file")}) == 1 else "cross_file",
+            "boundary": "Retrieval -> Tool",
+            "source": "Retrieved Content",
+            "source_class": "retrieval",
+            "sink": "Tool Sink",
+            "sink_class": "tool",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in retrieval_poisoning_findings) else "Medium",
+            "confidence_score": 88,
+            "evidence": [source_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                }
+            ],
+            "data_flow_summary": "Retrieved corpus content can influence tool use.",
+        })
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if len({f.get("file") for f in retrieval_poisoning_findings if f.get("file")}) == 1 else "cross_file",
+            "boundary": "Retrieval -> Execution",
+            "source": "Retrieved Content",
+            "source_class": "retrieval",
+            "sink": "Execution Sink",
+            "sink_class": "execution",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in retrieval_poisoning_findings) else "Medium",
+            "confidence_score": 87,
+            "evidence": [source_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                }
+            ],
+            "data_flow_summary": "Retrieved corpus content can influence execution paths.",
         })
     mcp_tool_findings = [f for f in findings if f.get("category") == "mcp_tool_abuse"]
     mcp_credential_findings = [f for f in mcp_tool_findings if f.get("rule") == "mcp_env_credentials_exposure"]
@@ -766,6 +849,14 @@ def attack_chains(trust_paths_items):
             "confidence_score": 88,
             "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Prompt ->")),
         })
+    if has_source("retrieval") and has_sink("prompt") and has_sink("tool"):
+        chains.append({
+            "name": "Retrieval -> Prompt -> Tool",
+            "risk": "High",
+            "reason": "Retrieved content can shape prompts and then influence tool use.",
+            "confidence_score": 89,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Retrieval ->")),
+        })
     if has_source("prompt") and has_sink("execution"):
         chains.append({
             "name": "Prompt -> Execution",
@@ -805,6 +896,22 @@ def attack_chains(trust_paths_items):
             "reason": "Tool-originated input can expose credentials and then reach outbound requests.",
             "confidence_score": 91,
             "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Tool ->")),
+        })
+    if has_source("retrieval") and has_sink("tool") and has_sink("network"):
+        chains.append({
+            "name": "Retrieval -> Tool -> Network",
+            "risk": "High",
+            "reason": "Retrieved content can influence tools and then reach outbound requests.",
+            "confidence_score": 88,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Retrieval ->")),
+        })
+    if has_source("retrieval") and has_sink("prompt") and has_sink("execution"):
+        chains.append({
+            "name": "Retrieval -> Prompt -> Execution",
+            "risk": "High",
+            "reason": "Retrieved content can shape prompts and then reach execution sinks.",
+            "confidence_score": 87,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Retrieval ->")),
         })
     if has_source("retrieval") and has_sink("network"):
         chains.append({
@@ -915,12 +1022,14 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         "## Top Risks",
     ]
     agentic_findings = [finding for finding in findings if finding.get("category") == "agentic_security"]
+    retrieval_findings = [finding for finding in findings if finding.get("category") == "retrieval_poisoning"]
     lines.extend([
         "",
         "## Agentic AI Security",
         f"- Prompt Injection Findings: {sum(1 for finding in agentic_findings if finding.get('rule') in {'prompt_override', 'role_manipulation', 'hidden_instruction'})}",
         f"- Tool Abuse Findings: {sum(1 for finding in agentic_findings if finding.get('rule') == 'tool_abuse_instruction')}",
         f"- Prompt Extraction Findings: {sum(1 for finding in agentic_findings if finding.get('rule') == 'prompt_extraction')}",
+        f"- Retrieval Poisoning Findings: {len(retrieval_findings)}",
     ])
     if risks:
         for index, finding in enumerate(risks, start=1):
