@@ -4,6 +4,20 @@
   "description": "Repository security audit skill bundle for Codex.",
   "license": "MIT",
   "keywords": ["pi-package", "skills", "security", "audit"],
+  "files": [
+    "scripts",
+    "commands",
+    ".opencode",
+    ".codex-plugin",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "VERSION"
+  ],
+  "bin": {
+    "repo-security-audit": "scripts/run_audit.py"
+  },
   "pi": {
     "skills": ["./skills"]
   }

@@ -6,6 +6,8 @@ model-level review, prompt-injection phrasing embedded in descriptions, and
 untrusted plugin / MCP references.
 """
 import sys, os, re, json, fnmatch
+from pathlib import Path
+from scanner_utils import iter_repo_files, relativise
 
 INJECTION_PHRASES = [
     r"ignore (all )?(previous|prior) instructions",
@@ -21,24 +23,20 @@ BROAD_TOOLS = {"Bash", "WebFetch", "Write", "Execute"}
 
 def find_skill_files(repo_path):
     out = []
-    for root, dirs, files in os.walk(repo_path):
-        if ".git" in root:
-            continue
-        for fn in files:
-            if fn == "SKILL.md":
-                out.append(os.path.join(root, fn))
+    for _, path in iter_repo_files(repo_path):
+        if path.name == "SKILL.md":
+            out.append(str(path))
     return out
 
 def find_mcp_configs(repo_path):
     out = []
-    for root, dirs, files in os.walk(repo_path):
-        if ".git" in root:
-            continue
-        for fn in files:
-            if fn in ("plugin.json", "package.json") or fnmatch.fnmatch(fn, "mcp*.json") or fn == "mcp.json":
-                out.append(os.path.join(root, fn))
-            if fn.endswith(".toml") and "command" in root.lower():
-                out.append(os.path.join(root, fn))
+    for _, path in iter_repo_files(repo_path):
+        fn = path.name
+        root = str(path.parent)
+        if fn in ("plugin.json", "package.json") or fnmatch.fnmatch(fn, "mcp*.json") or fn == "mcp.json":
+            out.append(str(path))
+        if fn.endswith(".toml") and "command" in root.lower():
+            out.append(str(path))
     return out
 
 def scan_skill_md(path, findings):
@@ -130,6 +128,9 @@ def walk(repo_path):
         scan_skill_md(skill_file, findings)
     for mcp_file in find_mcp_configs(repo_path):
         scan_mcp_config(mcp_file, findings)
+    repo_root = Path(repo_path).resolve()
+    for finding in findings:
+        finding["file"] = relativise(repo_root, Path(finding["file"]))
     return findings
 
 if __name__ == "__main__":

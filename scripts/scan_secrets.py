@@ -5,8 +5,8 @@ Regex signatures for known credential formats + Shannon-entropy check on
 generic string literals. Prints JSON findings to stdout. No network access.
 """
 import sys, os, re, json, math, fnmatch
-
-SKIP_DIRS = {".git", "node_modules", "dist", "build", "venv", ".venv", "__pycache__"}
+from pathlib import Path
+from scanner_utils import iter_repo_files, relativise
 LOW_CONTEXT_PATTERNS = ["test", "fixture", "example", "sample", "mock", "placeholder"]
 
 SIGNATURES = [
@@ -68,12 +68,14 @@ def redact(s: str) -> str:
 
 def walk(repo_path: str):
     findings = []
-    for root, dirs, files in os.walk(repo_path):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for fn in files:
-            if fn.endswith((".lock", ".png", ".jpg", ".pdf", ".zip", ".woff", ".ttf")):
-                continue
-            scan_file(os.path.join(root, fn), findings)
+    repo_root = None
+    for repo_root, path in iter_repo_files(repo_path):
+        if path.name.endswith((".lock",)):
+            continue
+        scan_file(str(path), findings)
+    if repo_root is not None:
+        for finding in findings:
+            finding["file"] = relativise(repo_root, Path(finding["file"]))
     return findings
 
 if __name__ == "__main__":

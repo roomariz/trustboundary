@@ -1,0 +1,2381 @@
+{
+  "schema_version": 2,
+  "repo": {
+    "name": "trustboundary",
+    "path": "D:\\workspace\\trustboundary"
+  },
+  "generated_at": "2026-06-19T12:29:51",
+  "summary": {
+    "total_findings": 82,
+    "severity_counts": {
+      "Critical": 4,
+      "High": 6,
+      "Medium": 72,
+      "Low": 0,
+      "Info": 0
+    },
+    "overall_posture": "Critical",
+    "release_decision": "NOT_READY_FOR_PRODUCTION",
+    "production_blockers": 10
+  },
+  "trust_boundary": {
+    "filesystem_access": {
+      "label": "Filesystem Access",
+      "finding_count": 60,
+      "highest_severity": "Critical",
+      "production_blocker_count": 10,
+      "status": "observed"
+    },
+    "network_access": {
+      "label": "Network Access",
+      "finding_count": 5,
+      "highest_severity": "Medium",
+      "production_blocker_count": 0,
+      "status": "observed"
+    },
+    "environment_access": {
+      "label": "Environment Access",
+      "finding_count": 8,
+      "highest_severity": "Critical",
+      "production_blocker_count": 8,
+      "status": "observed"
+    },
+    "execution_access": {
+      "label": "Execution Access",
+      "finding_count": 55,
+      "highest_severity": "High",
+      "production_blocker_count": 2,
+      "status": "observed"
+    }
+  },
+  "attack_surface": {
+    "findings_by_category": {
+      "leaked_secrets": 8,
+      "insecure_config": 14,
+      "unsafe_execution": 52,
+      "prompt_injection": 3,
+      "data_exfiltration": 5
+    },
+    "top_rules": [
+      "aws_access_key_id",
+      "generic_secret_assignment",
+      "aws_access_key_id",
+      "generic_secret_assignment",
+      "aws_access_key_id",
+      "generic_secret_assignment",
+      "aws_access_key_id",
+      "generic_secret_assignment",
+      "tenant_filter_missing",
+      "cross_tenant_retrieval"
+    ],
+    "high_risk_paths": 10
+  },
+  "trust_paths": [
+    {
+      "name": "Retrieval-to-External-Request",
+      "attack_path": [
+        "User Input",
+        "Retrieval Layer",
+        "External Request"
+      ],
+      "trust_path": [
+        "User Input",
+        "Retrieval Guard",
+        "Allowlisted Request"
+      ],
+      "data_flow_summary": "Repository code may pass retrieved or user-controlled data into outbound requests."
+    }
+  ],
+  "framework_specific_findings": [],
+  "findings": [
+    {
+      "id": "LEAKED_SECRETS-0001",
+      "category": "leaked_secrets",
+      "rule": "aws_access_key_id",
+      "severity": "Critical",
+      "confidence": 90,
+      "confidence_bucket": "Confirmed",
+      "file": "scripts/validate_plugin.py",
+      "line": 95,
+      "evidence_redacted": "AKIA************CDEF",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/validate_plugin.py",
+          "line": 95
+        }
+      ],
+      "confidence_level": "HIGH",
+      "impact": "Credentials or secret material may be exposed to anyone who can read the repository or its logs.",
+      "recommendation": "Remove the secret from the tree, rotate the credential, and move the value into a secrets manager.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "filesystem",
+        "credentials"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "LEAKED_SECRETS-0002",
+      "category": "leaked_secrets",
+      "rule": "generic_secret_assignment",
+      "severity": "High",
+      "confidence": 55,
+      "confidence_bucket": "Likely",
+      "file": "scripts/validate_plugin.py",
+      "line": 95,
+      "evidence_redacted": "API_************************DEF\"",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/validate_plugin.py",
+          "line": 95
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Credentials or secret material may be exposed to anyone who can read the repository or its logs.",
+      "recommendation": "Remove the secret from the tree, rotate the credential, and move the value into a secrets manager.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "filesystem",
+        "credentials"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "LEAKED_SECRETS-0003",
+      "category": "leaked_secrets",
+      "rule": "aws_access_key_id",
+      "severity": "Critical",
+      "confidence": 30,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 28,
+      "evidence_redacted": "AKIA************CDEF",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 28
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Credentials or secret material may be exposed to anyone who can read the repository or its logs.",
+      "recommendation": "Remove the secret from the tree, rotate the credential, and move the value into a secrets manager.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "filesystem",
+        "credentials"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "LEAKED_SECRETS-0004",
+      "category": "leaked_secrets",
+      "rule": "generic_secret_assignment",
+      "severity": "High",
+      "confidence": 0,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 28,
+      "evidence_redacted": "API_************************DEF\"",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 28
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Credentials or secret material may be exposed to anyone who can read the repository or its logs.",
+      "recommendation": "Remove the secret from the tree, rotate the credential, and move the value into a secrets manager.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "filesystem",
+        "credentials"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "LEAKED_SECRETS-0005",
+      "category": "leaked_secrets",
+      "rule": "aws_access_key_id",
+      "severity": "Critical",
+      "confidence": 30,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 318,
+      "evidence_redacted": "AKIA************CDEF",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 318
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Credentials or secret material may be exposed to anyone who can read the repository or its logs.",
+      "recommendation": "Remove the secret from the tree, rotate the credential, and move the value into a secrets manager.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "filesystem",
+        "credentials"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "LEAKED_SECRETS-0006",
+      "category": "leaked_secrets",
+      "rule": "generic_secret_assignment",
+      "severity": "High",
+      "confidence": 0,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 318,
+      "evidence_redacted": "API_************************DEF\"",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 318
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Credentials or secret material may be exposed to anyone who can read the repository or its logs.",
+      "recommendation": "Remove the secret from the tree, rotate the credential, and move the value into a secrets manager.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "filesystem",
+        "credentials"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "LEAKED_SECRETS-0007",
+      "category": "leaked_secrets",
+      "rule": "aws_access_key_id",
+      "severity": "Critical",
+      "confidence": 30,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 458,
+      "evidence_redacted": "AKIA************CDEF",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 458
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Credentials or secret material may be exposed to anyone who can read the repository or its logs.",
+      "recommendation": "Remove the secret from the tree, rotate the credential, and move the value into a secrets manager.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "filesystem",
+        "credentials"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "LEAKED_SECRETS-0008",
+      "category": "leaked_secrets",
+      "rule": "generic_secret_assignment",
+      "severity": "High",
+      "confidence": 0,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 458,
+      "evidence_redacted": "toke**********************DEF\"",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 458
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Credentials or secret material may be exposed to anyone who can read the repository or its logs.",
+      "recommendation": "Remove the secret from the tree, rotate the credential, and move the value into a secrets manager.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "filesystem",
+        "credentials"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0009",
+      "category": "insecure_config",
+      "rule": "tenant_filter_missing",
+      "severity": "Medium",
+      "confidence": 65,
+      "confidence_bucket": "Likely",
+      "file": "prd/repository-trust-boundary-auditor-prd.md",
+      "line": 54,
+      "evidence_redacted": "15. As a developer, I want to identify retrieval-layer weaknesses so that cross-tenant access cannot",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "prd/repository-trust-boundary-auditor-prd.md",
+          "line": 54
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0010",
+      "category": "insecure_config",
+      "rule": "cross_tenant_retrieval",
+      "severity": "Medium",
+      "confidence": 70,
+      "confidence_bucket": "Likely",
+      "file": "prd/repository-trust-boundary-auditor-prd.md",
+      "line": 54,
+      "evidence_redacted": "15. As a developer, I want to identify retrieval-layer weaknesses so that cross-tenant access cannot",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "prd/repository-trust-boundary-auditor-prd.md",
+          "line": 54
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0011",
+      "category": "insecure_config",
+      "rule": "cross_tenant_retrieval",
+      "severity": "Medium",
+      "confidence": 70,
+      "confidence_bucket": "Likely",
+      "file": "prd/repository-trust-boundary-auditor-prd.md",
+      "line": 82,
+      "evidence_redacted": "* Multi-Tenant Isolation",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "prd/repository-trust-boundary-auditor-prd.md",
+          "line": 82
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0012",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 55,
+      "confidence_bucket": "Likely",
+      "file": "scripts/run_audit.py",
+      "line": 491,
+      "evidence_redacted": "findings_path.write_text(json.dumps(build_json_output(target_repo, scored), indent=2), encoding=\"utf",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/run_audit.py",
+          "line": 491
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0013",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 55,
+      "confidence_bucket": "Likely",
+      "file": "scripts/run_audit.py",
+      "line": 492,
+      "evidence_redacted": "report_path.write_text(render_report(target_repo, scored), encoding=\"utf-8\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/run_audit.py",
+          "line": 492
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0014",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scanner_utils.py",
+      "line": 15,
+      "evidence_redacted": "for root, dirs, files in os.walk(repo_root, followlinks=False):",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scanner_utils.py",
+          "line": 15
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0015",
+      "category": "unsafe_execution",
+      "rule": "recursive_filesystem_operation",
+      "severity": "Medium",
+      "confidence": 40,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scanner_utils.py",
+      "line": 15,
+      "evidence_redacted": "for root, dirs, files in os.walk(repo_root, followlinks=False):",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scanner_utils.py",
+          "line": 15
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0016",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scan_dependencies.py",
+      "line": 36,
+      "evidence_redacted": "data = json.load(open(path))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_dependencies.py",
+          "line": 36
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0017",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scan_dependencies.py",
+      "line": 74,
+      "evidence_redacted": "for lineno, line in enumerate(open(path, errors=\"ignore\"), start=1):",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_dependencies.py",
+          "line": 74
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0018",
+      "category": "insecure_config",
+      "rule": "credential_env_passthrough",
+      "severity": "Medium",
+      "confidence": 60,
+      "confidence_bucket": "Likely",
+      "file": "scripts/scan_exec_patterns.py",
+      "line": 29,
+      "evidence_redacted": "(\"credential_env_passthrough\", r\"(?i)\\b(env|environment)\\b.*\\b(secret|token|password|key)\\b\", 60),",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_exec_patterns.py",
+          "line": 29
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "PROMPT_INJECTION-0019",
+      "category": "prompt_injection",
+      "rule": "missing_instruction_separation",
+      "severity": "Medium",
+      "confidence": 60,
+      "confidence_bucket": "Likely",
+      "file": "scripts/scan_exec_patterns.py",
+      "line": 35,
+      "evidence_redacted": "(\"missing_instruction_separation\", r\"(?i)\\b(prompt|system prompt)\\b.*\\b(append|concat|combine|mix)\\b",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_exec_patterns.py",
+          "line": 35
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Repository content may influence an agent as instructions instead of data.",
+      "recommendation": "Untrusted instructions can alter model behavior. Separate content from prompts and sanitize injected text. Prefer structured templates and quoted user content.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "agent",
+        "prompt"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0020",
+      "category": "insecure_config",
+      "rule": "missing_authentication",
+      "severity": "Medium",
+      "confidence": 75,
+      "confidence_bucket": "Likely",
+      "file": "scripts/scan_exec_patterns.py",
+      "line": 39,
+      "evidence_redacted": "(\"missing_authentication\", r\"(?i)\\b(skip_auth|bypass_auth|auth_disabled|allow_anonymous|anonymous_ac",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_exec_patterns.py",
+          "line": 39
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0021",
+      "category": "insecure_config",
+      "rule": "missing_authorisation",
+      "severity": "Medium",
+      "confidence": 75,
+      "confidence_bucket": "Likely",
+      "file": "scripts/scan_exec_patterns.py",
+      "line": 40,
+      "evidence_redacted": "(\"missing_authorisation\", r\"(?i)\\b(skip_authori[sz]ation|bypass_authori[sz]ation|authorization_disab",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_exec_patterns.py",
+          "line": 40
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0022",
+      "category": "insecure_config",
+      "rule": "admin_bypass_risk",
+      "severity": "Medium",
+      "confidence": 70,
+      "confidence_bucket": "Likely",
+      "file": "scripts/scan_exec_patterns.py",
+      "line": 41,
+      "evidence_redacted": "(\"admin_bypass_risk\", r\"(?i)\\b(admin|superuser|root)\\b.*\\b(bypass|override|elevate|escalate)\\b\", 70)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_exec_patterns.py",
+          "line": 41
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0023",
+      "category": "insecure_config",
+      "rule": "tenant_filter_missing",
+      "severity": "Medium",
+      "confidence": 65,
+      "confidence_bucket": "Likely",
+      "file": "scripts/scan_exec_patterns.py",
+      "line": 42,
+      "evidence_redacted": "(\"tenant_filter_missing\", r\"(?i)\\b(all tenants|cross[- ]tenant|tenant[- ]agnostic|global query|no te",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_exec_patterns.py",
+          "line": 42
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0024",
+      "category": "insecure_config",
+      "rule": "cross_tenant_retrieval",
+      "severity": "Medium",
+      "confidence": 70,
+      "confidence_bucket": "Likely",
+      "file": "scripts/scan_exec_patterns.py",
+      "line": 43,
+      "evidence_redacted": "(\"cross_tenant_retrieval\", r\"(?i)\\b(cross[- ]tenant|tenant leakage|tenant isolation|tenant boundary)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_exec_patterns.py",
+          "line": 43
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0025",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scan_exec_patterns.py",
+      "line": 68,
+      "evidence_redacted": "lines = open(path, errors=\"ignore\").readlines()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_exec_patterns.py",
+          "line": 68
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0026",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scan_exfil_patterns.py",
+      "line": 23,
+      "evidence_redacted": "lines = open(path, errors=\"ignore\").readlines()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_exfil_patterns.py",
+          "line": 23
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0027",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scan_frameworks.py",
+      "line": 18,
+      "evidence_redacted": "text = Path(path).read_text(errors=\"ignore\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_frameworks.py",
+          "line": 18
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0028",
+      "category": "insecure_config",
+      "rule": "environment_variable_access",
+      "severity": "Medium",
+      "confidence": 55,
+      "confidence_bucket": "Likely",
+      "file": "scripts/scan_frameworks.py",
+      "line": 71,
+      "evidence_redacted": "if (service_role_literal or service_role_assignment) and \"os.getenv\" not in lower and \"os.environ\" n",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_frameworks.py",
+          "line": 71
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0029",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scan_secrets.py",
+      "line": 34,
+      "evidence_redacted": "with open(path, \"r\", errors=\"ignore\") as f:",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_secrets.py",
+          "line": 34
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0030",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scan_skills_and_mcp.py",
+      "line": 43,
+      "evidence_redacted": "text = open(path, errors=\"ignore\").read()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_skills_and_mcp.py",
+          "line": 43
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0031",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/scan_skills_and_mcp.py",
+      "line": 77,
+      "evidence_redacted": "data = json.load(open(path))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/scan_skills_and_mcp.py",
+          "line": 77
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0032",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/score.py",
+      "line": 114,
+      "evidence_redacted": "raw = json.load(open(args.infile)) if args.infile else json.load(sys.stdin)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/score.py",
+          "line": 114
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0033",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/score.py",
+      "line": 140,
+      "evidence_redacted": "open(args.outfile, \"w\").write(text)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/score.py",
+          "line": 140
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0034",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 55,
+      "confidence_bucket": "Likely",
+      "file": "scripts/score.py",
+      "line": 140,
+      "evidence_redacted": "open(args.outfile, \"w\").write(text)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/score.py",
+          "line": 140
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0035",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/validate_plugin.py",
+      "line": 47,
+      "evidence_redacted": "package_data = json.loads(package_path.read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/validate_plugin.py",
+          "line": 47
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0036",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "scripts/validate_plugin.py",
+      "line": 85,
+      "evidence_redacted": "readme_text = readme.read_text(encoding=\"utf-8\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/validate_plugin.py",
+          "line": 85
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0037",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 55,
+      "confidence_bucket": "Likely",
+      "file": "scripts/validate_plugin.py",
+      "line": 94,
+      "evidence_redacted": "fixture_repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/validate_plugin.py",
+          "line": 94
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0038",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 55,
+      "confidence_bucket": "Likely",
+      "file": "scripts/validate_plugin.py",
+      "line": 95,
+      "evidence_redacted": "(fixture_repo / \"app.py\").write_text('EXAMPLE_VALUE = \"sample-data\"\\n', encoding=\"utf-8\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "scripts/validate_plugin.py",
+          "line": 95
+        }
+      ],
+      "confidence_level": "MEDIUM",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0039",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 23,
+      "evidence_redacted": "path.parent.mkdir(parents=True, exist_ok=True)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 23
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0040",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 24,
+      "evidence_redacted": "path.write_text(content, encoding=\"utf-8\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 24
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0041",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 35,
+      "evidence_redacted": "Path(\"output.txt\").write_text(\"hello\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 35
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0042",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 36,
+      "evidence_redacted": "open(\"audit.log\", \"w\").write(\"hello\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 36
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0043",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 36,
+      "evidence_redacted": "open(\"audit.log\", \"w\").write(\"hello\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 36
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0044",
+      "category": "unsafe_execution",
+      "rule": "filesystem_delete_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 37,
+      "evidence_redacted": "os.remove(\"stale.txt\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 37
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0045",
+      "category": "unsafe_execution",
+      "rule": "filesystem_delete_access",
+      "severity": "Medium",
+      "confidence": 45,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 39,
+      "evidence_redacted": "shutil.rmtree(\"tmp\", ignore_errors=True)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 39
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0046",
+      "category": "insecure_config",
+      "rule": "environment_variable_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 48,
+      "evidence_redacted": "secret = os.environ[\"API_KEY\"]",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 48
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0047",
+      "category": "insecure_config",
+      "rule": "environment_variable_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 49,
+      "evidence_redacted": "token = getenv(\"TOKEN\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 49
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0048",
+      "category": "insecure_config",
+      "rule": "environment_variable_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 50,
+      "evidence_redacted": "load_dotenv()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 50
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0049",
+      "category": "unsafe_execution",
+      "rule": "shell_true",
+      "severity": "High",
+      "confidence": 40,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 71,
+      "evidence_redacted": "subprocess.run(cmd, shell=True)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 71
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0050",
+      "category": "unsafe_execution",
+      "rule": "os_system",
+      "severity": "Medium",
+      "confidence": 30,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 72,
+      "evidence_redacted": "os.system(\"echo hi\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 72
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0051",
+      "category": "unsafe_execution",
+      "rule": "eval_on_dynamic_input",
+      "severity": "High",
+      "confidence": 20,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 73,
+      "evidence_redacted": "eval(user_input)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 73
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "REQUIRED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": true,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0052",
+      "category": "unsafe_execution",
+      "rule": "exec_call",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 74,
+      "evidence_redacted": "exec(user_input)",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 74
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "PROMPT_INJECTION-0053",
+      "category": "prompt_injection",
+      "rule": "direct_user_input_in_prompt",
+      "severity": "Medium",
+      "confidence": 35,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 77,
+      "evidence_redacted": "write(repo / \"prompt.py\", 'prompt = f\"ignore previous instructions: {user_input}\"\\n')",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 77
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository content may influence an agent as instructions instead of data.",
+      "recommendation": "Untrusted instructions can alter model behavior. Separate content from prompts and sanitize injected text. Prefer structured templates and quoted user content.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "agent",
+        "prompt"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "PROMPT_INJECTION-0054",
+      "category": "prompt_injection",
+      "rule": "direct_user_input_in_prompt",
+      "severity": "Medium",
+      "confidence": 35,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 127,
+      "evidence_redacted": "prompt = f\"Please summarize {user_input} for the model\"",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 127
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository content may influence an agent as instructions instead of data.",
+      "recommendation": "Untrusted instructions can alter model behavior. Separate content from prompts and sanitize injected text. Prefer structured templates and quoted user content.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "agent",
+        "prompt"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "INSECURE_CONFIG-0055",
+      "category": "insecure_config",
+      "rule": "environment_variable_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 217,
+      "evidence_redacted": "client = create_client(\"https://example.supabase.co\", os.getenv(\"SUPABASE_SERVICE_ROLE_KEY\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 217
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Configuration weakens production security posture or access controls.",
+      "recommendation": "Tighten defaults, disable debug helpers, and restore secure configuration values.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "configuration"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0056",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 253,
+      "evidence_redacted": "repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 253
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0057",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 264,
+      "evidence_redacted": "payload = json.loads(findings_path.read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 264
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0058",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 296,
+      "evidence_redacted": "report = report_path.read_text(encoding=\"utf-8\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 296
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0059",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 317,
+      "evidence_redacted": "fixture_repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 317
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0060",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 335,
+      "evidence_redacted": "payload = json.loads(findings_path.read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 335
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0061",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 341,
+      "evidence_redacted": "report = report_path.read_text(encoding=\"utf-8\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 341
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0062",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 352,
+      "evidence_redacted": "repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 352
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0063",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 363,
+      "evidence_redacted": "payload = json.loads(findings_path.read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 363
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0064",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 370,
+      "evidence_redacted": "report = report_path.read_text(encoding=\"utf-8\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 370
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0065",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 379,
+      "evidence_redacted": "repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 379
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0066",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 385,
+      "evidence_redacted": "payload = json.loads((tmp_path / \"security-audit-findings.json\").read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 385
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0067",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 401,
+      "evidence_redacted": "unsafe_repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 401
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0068",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 406,
+      "evidence_redacted": "unsafe_payload = json.loads((tmp_path / \"security-audit-findings.json\").read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 406
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0069",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 415,
+      "evidence_redacted": "safe_repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 415
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0070",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 420,
+      "evidence_redacted": "safe_payload = json.loads((tmp_path / \"security-audit-findings.json\").read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 420
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0071",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 429,
+      "evidence_redacted": "unsafe_repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 429
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0072",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 434,
+      "evidence_redacted": "unsafe_payload = json.loads((tmp_path / \"security-audit-findings.json\").read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 434
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0073",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 441,
+      "evidence_redacted": "safe_repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 441
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0074",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 446,
+      "evidence_redacted": "safe_payload = json.loads((tmp_path / \"security-audit-findings.json\").read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 446
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0075",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 455,
+      "evidence_redacted": "repo.mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 455
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0076",
+      "category": "unsafe_execution",
+      "rule": "filesystem_write_access",
+      "severity": "Medium",
+      "confidence": 25,
+      "confidence_bucket": "Possible",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 457,
+      "evidence_redacted": "(repo / \".git\").mkdir()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 457
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "UNSAFE_EXECUTION-0077",
+      "category": "unsafe_execution",
+      "rule": "filesystem_read_access",
+      "severity": "Medium",
+      "confidence": 15,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 463,
+      "evidence_redacted": "payload = json.loads((tmp_path / \"security-audit-findings.json\").read_text(encoding=\"utf-8\"))",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 463
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code can execute shell commands or dynamic code paths.",
+      "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "execution",
+        "filesystem"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "DATA_EXFILTRATION-0078",
+      "category": "data_exfiltration",
+      "rule": "network_client_usage",
+      "severity": "Medium",
+      "confidence": 20,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 58,
+      "evidence_redacted": "import urllib.request",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 58
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code may send data to external destinations.",
+      "recommendation": "Remove undeclared egress, allowlist destinations, and avoid embedding sensitive data in requests.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "network",
+        "external_communication"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "DATA_EXFILTRATION-0079",
+      "category": "data_exfiltration",
+      "rule": "network_client_usage",
+      "severity": "Medium",
+      "confidence": 20,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 60,
+      "evidence_redacted": "httpx.post(\"https://example.com/api\", json={\"data\": \"value\"})",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 60
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code may send data to external destinations.",
+      "recommendation": "Remove undeclared egress, allowlist destinations, and avoid embedding sensitive data in requests.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "network",
+        "external_communication"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "DATA_EXFILTRATION-0080",
+      "category": "data_exfiltration",
+      "rule": "network_client_usage",
+      "severity": "Medium",
+      "confidence": 20,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 61,
+      "evidence_redacted": "requests.post(\"https://example.com/webhook\", json={\"data\": \"value\"})",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 61
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code may send data to external destinations.",
+      "recommendation": "Remove undeclared egress, allowlist destinations, and avoid embedding sensitive data in requests.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "network",
+        "external_communication"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "DATA_EXFILTRATION-0081",
+      "category": "data_exfiltration",
+      "rule": "network_client_usage",
+      "severity": "Medium",
+      "confidence": 20,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 62,
+      "evidence_redacted": "urllib.request.urlopen(\"https://example.com\")",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 62
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code may send data to external destinations.",
+      "recommendation": "Remove undeclared egress, allowlist destinations, and avoid embedding sensitive data in requests.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "network",
+        "external_communication"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    },
+    {
+      "id": "DATA_EXFILTRATION-0082",
+      "category": "data_exfiltration",
+      "rule": "network_client_usage",
+      "severity": "Medium",
+      "confidence": 20,
+      "confidence_bucket": "Speculative",
+      "file": "tests/test_repo_security_audit.py",
+      "line": 63,
+      "evidence_redacted": "socket.socket()",
+      "evidence_count": 1,
+      "evidence_locations": [
+        {
+          "file": "tests/test_repo_security_audit.py",
+          "line": 63
+        }
+      ],
+      "confidence_level": "LOW",
+      "impact": "Repository code may send data to external destinations.",
+      "recommendation": "Remove undeclared egress, allowlist destinations, and avoid embedding sensitive data in requests.",
+      "remediation_priority": "RECOMMENDED",
+      "trust_boundary": [
+        "network",
+        "external_communication"
+      ],
+      "production_blocker": false,
+      "status": "open"
+    }
+  ],
+  "correlations": [
+    {
+      "type": "exec_plus_exfil_chain",
+      "file": "tests/test_repo_security_audit.py",
+      "note": "Unsafe execution and outbound data patterns in the same file \u2014 treat as a compound exfiltration-via-execution risk, not two independent low findings."
+    }
+  ]
+}

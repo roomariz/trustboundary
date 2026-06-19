@@ -8,6 +8,8 @@ and internal-looking names that might collide with public registries
 is a separate, human-approved step (see SKILL.md step 3).
 """
 import sys, os, json, re
+from pathlib import Path
+from scanner_utils import iter_repo_files, relativise
 
 MANIFESTS = ["package.json", "requirements.txt", "pyproject.toml", "go.mod", "Cargo.toml"]
 POPULAR_NPM = ["react", "lodash", "express", "axios", "chalk", "request", "commander"]
@@ -92,14 +94,16 @@ def scan_requirements_txt(path, findings):
 
 def walk(repo_path):
     findings = []
-    for root, dirs, files in os.walk(repo_path):
-        dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "venv", ".venv")]
-        for fn in files:
-            full = os.path.join(root, fn)
-            if fn == "package.json":
-                scan_package_json(full, findings)
-            elif fn in ("requirements.txt", "requirements-dev.txt"):
-                scan_requirements_txt(full, findings)
+    repo_root = None
+    for repo_root, path in iter_repo_files(repo_path):
+        full = str(path)
+        if path.name == "package.json":
+            scan_package_json(full, findings)
+        elif path.name in ("requirements.txt", "requirements-dev.txt"):
+            scan_requirements_txt(full, findings)
+    if repo_root is not None:
+        for finding in findings:
+            finding["file"] = relativise(repo_root, Path(finding["file"]))
     return findings
 
 if __name__ == "__main__":

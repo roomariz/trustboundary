@@ -5,8 +5,8 @@ outbound URLs/webhooks, data concatenated into URLs, and DNS-exfil-shaped
 strings. Read-only; never makes outbound calls itself.
 """
 import sys, os, re, json
-
-SKIP_DIRS = {".git", "node_modules", "venv", ".venv", "dist", "build"}
+from pathlib import Path
+from scanner_utils import iter_repo_files, relativise
 
 PATTERNS = [
     ("hardcoded_webhook_url", r"https?://[a-zA-Z0-9.\-]*(webhook|hooks\.slack|discord\.com/api/webhooks)[^\s\"'<>]*", 55),
@@ -14,6 +14,8 @@ PATTERNS = [
     ("suspicious_dns_exfil_shape", r"[a-f0-9]{16,}\.[a-z0-9.\-]+\.(com|net|io|xyz)", 35),
     ("base64_post_body", r"(fetch|axios\.post|requests\.post)\([^)]*btoa\(", 50),
     ("undeclared_telemetry_beacon", r"(?i)(beacon|telemetry|analytics)\.send\(", 30),
+    ("network_client_usage", r"\b(requests\.(get|post|put|patch|delete|request|Session)|httpx\.(get|post|put|patch|delete|request|Client|AsyncClient)|aiohttp\.(ClientSession|request)|urllib\.(request|parse)|socket\.(socket|create_connection)|fetch\s*\(|axios\.(get|post|put|patch|delete|request|create))\b", 50),
+    ("websocket_client_usage", r"(?i)\b(new\s+WebSocket|WebSocket\s*\(|ws\.(connect|send)|socket\.io)\b", 45),
 ]
 
 def scan_file(path, findings):
@@ -33,11 +35,13 @@ def scan_file(path, findings):
 
 def walk(repo_path):
     findings = []
-    for root, dirs, files in os.walk(repo_path):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for fn in files:
-            if fn.endswith((".py", ".js", ".ts", ".sh", ".html")):
-                scan_file(os.path.join(root, fn), findings)
+    repo_root = None
+    for repo_root, path in iter_repo_files(repo_path):
+        if path.suffix.lower() in (".py", ".js", ".ts", ".sh", ".html"):
+            scan_file(str(path), findings)
+    if repo_root is not None:
+        for finding in findings:
+            finding["file"] = relativise(repo_root, Path(finding["file"]))
     return findings
 
 if __name__ == "__main__":

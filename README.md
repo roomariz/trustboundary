@@ -1,34 +1,63 @@
 # Trustboundary
 
-This bundle packages the `repo-security-audit` skill so it can be installed and used in Codex like other skill plugins.
+`repo-security-audit` is a read-only security audit plugin and CLI for repositories, skills, plugins and MCP-style tooling.
 
-## Contents
+## Problem
+
+Developers and AI-agent users need a quick way to audit unfamiliar code before trusting or using it. This matters for repositories, plugins, skills and MCP-style tooling, where security risks can hide in secrets, dependencies, execution paths and configuration.
+
+## Solution
+
+This package provides a read-only, CLI-backed security audit plugin. It scans a target repository with local static checks and produces structured JSON plus a Markdown report for review.
+
+## What It Checks
+
+- Secrets and credentials
+- Risky dependency indicators
+- Dangerous execution patterns
+- Possible exfiltration patterns
+- Risky plugin, skill and MCP configuration patterns
+
+## What It Outputs
+
+- `security-audit-findings.json`
+- `SECURITY_AUDIT_REPORT.md`
+
+## Supported Usage
+
+CLI:
+
+```bash
+repo-security-audit /path/to/repo
+```
+
+Codex slash command:
+
+```text
+/repo-security-audit
+```
+
+OpenCode command:
+
+```text
+repo-security-audit .
+```
+
+Skill usage:
 
 - `skills/repo-security-audit/SKILL.md`
-- `scripts/`
-- `references/`
-- `.codex-plugin/plugin.json`
-- `package.json`
 
-## Install
+## Safety Model
 
-Add this repository as a Codex plugin source, then install the plugin from Codex's plugin UI or CLI if available in your setup.
+- Read-only scanning
+- No network calls
+- No auto-remediation
+- Does not modify target repositories except for the generated audit outputs in the current working directory
 
-## Use
+## Limitations
 
-Invoke the skill by its name:
+This is heuristic static scanning. It is not a full SAST platform, a penetration test, a dependency intelligence system, or a guarantee that code is safe. It can miss issues and it can produce false positives.
 
-- `repo-security-audit`
+## Release Readiness
 
-Or use the slash command form if your Codex setup exposes skill commands that way:
-
-- `/repo-security-audit`
-
-Command-style aliases included in this bundle:
-
-- `.codex-plugin/commands/repo-security-audit.toml`
-- `.opencode/command/repo-security-audit.md`
-
-## Notes
-
-This skill is designed for read-only security audits of repositories, skills, and plugin/MCP configuration. It does not auto-remediate findings.
+Run `python scripts/validate_plugin.py` and `pytest -q` before release to confirm the bundle and CLI wiring are intact.

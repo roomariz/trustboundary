@@ -46,9 +46,25 @@ SEVERITY_BY_RULE = {
     "suspicious_dns_exfil_shape": "Medium",
     "base64_post_body": "Medium",
     "undeclared_telemetry_beacon": "Low",
+    "unauthenticated_route": "High",
+    "unrestricted_admin_endpoint": "High",
+    "service_role_key_exposure": "Critical",
+    "missing_tenant_filters": "High",
+    "unrestricted_tool_routing": "High",
+    "unsafe_state_mutation": "Medium",
+    "unrestricted_tools": "High",
+    "missing_tool_validation": "Medium",
 }
 
 LOW_CONTEXT_TAGS = ["test", "fixture", "example", "sample", "mock"]
+
+
+def confidence_level(score):
+    if score >= 80:
+        return "HIGH"
+    if score >= 50:
+        return "MEDIUM"
+    return "LOW"
 
 def confidence_bucket(score):
     if score >= 80:
@@ -108,6 +124,7 @@ def main():
             "rule": f["rule"],
             "severity": severity,
             "confidence": conf,
+            "confidence_level": confidence_level(conf),
             "confidence_bucket": confidence_bucket(conf),
             "file": f.get("file"),
             "line": f.get("line"),
