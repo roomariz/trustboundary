@@ -54,6 +54,22 @@ def run_audit_cli(repo: Path, cwd: Path, *extra_args: str):
     )
 
 
+def run_audit_with_sarif(repo: Path, cwd: Path):
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--sarif", str(repo)],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
 def write(path: Path, content: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -560,8 +576,10 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
     assert result.returncode == 0, result.stderr
     findings_path = tmp_path / "security-audit-findings.json"
     report_path = tmp_path / "SECURITY_AUDIT_REPORT.md"
+    sarif_path = tmp_path / "security-audit-findings.sarif"
     assert findings_path.exists()
     assert report_path.exists()
+    assert not sarif_path.exists()
 
     payload = json.loads(findings_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 2
@@ -613,6 +631,87 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
     assert "Excluded Paths" in report
     assert "Full finding details are available in `security-audit-findings.json`." in report
     assert "Limitations" in report
+
+
+def test_sarif_output_is_created_and_structurally_valid(tmp_path):
+    repo = tmp_path / "sarif"
+    repo.mkdir()
+    build_risky_fixture(repo)
+
+    result = run_audit_with_sarif(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    sarif_path = tmp_path / "security-audit-findings.sarif"
+    assert sarif_path.exists()
+
+    sarif = json.loads(sarif_path.read_text(encoding="utf-8"))
+    assert sarif["version"] == "2.1.0"
+    assert sarif["$schema"].endswith("sarif-2.1.0.json")
+    assert isinstance(sarif["runs"], list) and sarif["runs"]
+
+    run = sarif["runs"][0]
+    assert run["tool"]["driver"]["name"] == "TrustBoundary"
+    assert run["tool"]["driver"]["rules"]
+    assert run["results"]
+
+    first_rule = run["tool"]["driver"]["rules"][0]
+    assert first_rule["id"]
+    assert "help" in first_rule and first_rule["help"]["text"]
+    assert "properties" in first_rule
+
+    first_result = run["results"][0]
+    assert first_result["ruleId"]
+    assert first_result["level"] in {"error", "warning", "note"}
+    assert first_result["message"]["text"]
+    assert "properties" in first_result
+
+
+def test_sarif_severity_mapping_and_properties(tmp_path):
+    repo = tmp_path / "sarif-severity"
+    repo.mkdir()
+    build_risky_fixture(repo)
+    write(repo / "entropy.py", 'token = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"\n')
+
+    result = run_audit_with_sarif(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    sarif = json.loads((tmp_path / "security-audit-findings.sarif").read_text(encoding="utf-8"))
+    results = sarif["runs"][0]["results"]
+    by_rule = {result["ruleId"]: result for result in results}
+
+    assert by_rule["shell_true"]["level"] == "error"
+    assert by_rule["eval_on_dynamic_input"]["level"] == "error"
+    assert by_rule["unscoped_bash_tool"]["level"] == "warning"
+    assert by_rule["high_entropy_literal"]["level"] == "note"
+
+    shell_result = by_rule["shell_true"]
+    assert shell_result["properties"]["category"]
+    assert shell_result["properties"]["severity"] == "High"
+    assert shell_result["properties"]["confidence_level"]
+    assert shell_result["properties"]["scope"]
+    assert shell_result["properties"]["trust_boundary"]
+    assert shell_result["properties"]["production_blocker"] in {True, False}
+    assert shell_result["properties"]["status"] == "open"
+    assert shell_result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+    assert shell_result["locations"][0]["physicalLocation"]["region"]["startLine"] >= 1
+
+
+def test_existing_outputs_still_generate_with_sarif(tmp_path):
+    repo = tmp_path / "sarif-existing"
+    repo.mkdir()
+    build_risky_fixture(repo)
+
+    result = run_audit_with_sarif(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "security-audit-findings.json").exists()
+    assert (tmp_path / "SECURITY_AUDIT_REPORT.md").exists()
+    assert (tmp_path / "security-audit-findings.sarif").exists()
+
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert payload["findings"]
+    assert "Executive Summary" in report
 
 
 def test_installed_cli_flow_creates_audit_outputs_and_succeeds_with_findings(tmp_path):

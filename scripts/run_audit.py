@@ -119,6 +119,7 @@ SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 BLOCKING_SEVERITIES = {"Critical", "High"}
 BLOCKING_CONFIDENCE = "HIGH"
 REMEDIATION_PRIORITY = {"Critical": "REQUIRED", "High": "REQUIRED", "Medium": "RECOMMENDED", "Low": "OPTIONAL", "Info": "OPTIONAL"}
+SARIF_SEVERITY_MAP = {"Critical": "error", "High": "error", "Medium": "warning", "Low": "note", "Info": "note"}
 ICON_SUCCESS = "✓"
 ICON_WARNING = "!"
 ICON_ERROR = "x"
@@ -1919,6 +1920,100 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
     }
 
 
+def _sarif_level(severity: str) -> str:
+    return SARIF_SEVERITY_MAP.get(severity, "warning")
+
+
+def build_sarif_output(repo_path: Path, findings, repo_config=None):
+    def _rule_sort_key(rule):
+        return (
+            rule.get("fullDescription", {}).get("text", ""),
+            rule["id"],
+        )
+
+    def _result_sort_key(result):
+        location = result.get("locations", [{}])[0].get("physicalLocation", {})
+        artifact = location.get("artifactLocation", {}).get("uri", "")
+        region = location.get("region", {})
+        return (
+            result.get("ruleId", ""),
+            result.get("level", ""),
+            artifact,
+            region.get("startLine") or 0,
+            result.get("message", {}).get("text", ""),
+        )
+
+    rule_map = {}
+    for finding in findings:
+        rule_id = finding.get("rule_id") or finding.get("rule")
+        if not rule_id or rule_id in rule_map:
+            continue
+        help_text = finding.get("recommendation") or finding.get("impact") or "Review this finding."
+        rule_map[rule_id] = {
+            "id": rule_id,
+            "name": rule_id,
+            "shortDescription": {"text": finding.get("rule", rule_id)},
+            "fullDescription": {"text": finding.get("impact") or finding.get("recommendation") or "TrustBoundary finding."},
+            "help": {"text": help_text},
+            "properties": {
+                "category": finding.get("category"),
+                "severity": finding.get("severity"),
+                "confidence_level": finding.get("confidence_level"),
+                "scope": finding.get("scope"),
+                "trust_boundary": finding.get("trust_boundary"),
+                "production_blocker": finding.get("production_blocker"),
+                "status": finding.get("status"),
+            },
+        }
+
+    rules = sorted(rule_map.values(), key=_rule_sort_key)
+    results = []
+    for finding in findings:
+        rule_id = finding.get("rule_id") or finding.get("rule")
+        if not rule_id:
+            continue
+        result = {
+            "ruleId": rule_id,
+            "level": _sarif_level(finding.get("severity", "Medium")),
+            "message": {"text": finding.get("impact") or finding.get("recommendation") or finding.get("evidence_snippet") or finding.get("rule") or rule_id},
+            "properties": {
+                "category": finding.get("category"),
+                "severity": finding.get("severity"),
+                "confidence_level": finding.get("confidence_level"),
+                "scope": finding.get("scope"),
+                "trust_boundary": finding.get("trust_boundary"),
+                "production_blocker": finding.get("production_blocker"),
+                "status": finding.get("status"),
+            },
+        }
+        if finding.get("file"):
+            physical_location = {
+                "artifactLocation": {"uri": Path(finding["file"]).as_posix()},
+            }
+            if finding.get("line"):
+                physical_location["region"] = {"startLine": finding["line"]}
+            result["locations"] = [{"physicalLocation": physical_location}]
+        results.append(result)
+
+    results.sort(key=_result_sort_key)
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "TrustBoundary",
+                        "informationUri": "https://github.com/openai/trustboundary",
+                        "rules": rules,
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", nargs="?", default=".")
@@ -1929,6 +2024,7 @@ def main(argv=None):
     parser.add_argument("--include-dependencies", action="store_true")
     parser.add_argument("--include-tests", action="store_true")
     parser.add_argument("--include-env-files", action="store_true")
+    parser.add_argument("--sarif", action="store_true")
     args = parser.parse_args(argv)
 
     if args.repo == "scan" and args.subcommand:
@@ -1977,6 +2073,7 @@ def main(argv=None):
         }
         findings_path = Path.cwd() / "security-audit-findings.json"
         report_path = Path.cwd() / "SECURITY_AUDIT_REPORT.md"
+        sarif_path = Path.cwd() / "security-audit-findings.sarif"
         emit("Generating reports...", args.quiet)
         json_output = build_json_output(target_repo, scored, scope_summary, audit_warnings=audit_warnings, repo_config=repo_config)
         findings_path.write_text(json.dumps(json_output, indent=2), encoding="utf-8")
@@ -1985,6 +2082,9 @@ def main(argv=None):
         if warnings_block:
             report += "\n" + warnings_block
         report_path.write_text(report, encoding="utf-8")
+        if args.sarif:
+            sarif_output = build_sarif_output(target_repo, json_output["findings"], repo_config=repo_config)
+            sarif_path.write_text(json.dumps(sarif_output, indent=2), encoding="utf-8")
         emit("")
         log_line("Done.", kind="success", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         emit(f"Total elapsed: {time.perf_counter() - started:.1f}s", args.quiet)
@@ -1999,6 +2099,8 @@ def main(argv=None):
             emit(f"Audit warnings: {len(audit_warnings)}", args.quiet)
         emit(f"Report: {report_path.name}", args.quiet)
         emit(f"JSON: {findings_path.name}", args.quiet)
+        if args.sarif:
+            emit(f"SARIF: {sarif_path.name}", args.quiet)
         return 0
     except Exception as exc:
         print(f"Audit failed: {exc}", file=sys.stderr)
