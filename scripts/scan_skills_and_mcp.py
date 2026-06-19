@@ -19,6 +19,16 @@ INJECTION_PHRASES = [
     r"send (this|the) (data|secret|key|token) to",
 ]
 
+AGENT_SURFACE_PATTERNS = [
+    ("system_prompt_surface", r"(?i)\b(system prompt|developer prompt|hidden prompt)\b", 70),
+    ("prompt_construction_surface", r"(?i)\b(prompt|messages?|chat_history|conversation)\b.*(\+|\.format\(|f[\"'])", 70),
+    ("retrieval_into_prompt_surface", r"(?i)\b(retriev\w*|rag|context|corpus|document)\b.*\b(prompt|messages?|conversation)\b", 75),
+    ("tool_definition_surface", r"(?i)\b(tool(s)?|function(s)?|mcpServers?|allowed-tools|allowed_tools)\b", 65),
+    ("tool_invocation_surface", r"(?i)\b(invoke|call|run|execute|use)\b.*\b(tool|tools|command|shell|subprocess|browser|fetch|request)\b", 75),
+    ("memory_surface", r"(?i)\b(memory|state|history|session cache|persistent context)\b", 65),
+    ("loop_surface", r"(?i)\b(auto_run|auto execute|loop until success|recursive task|unattended execution|spawn agent|delegate until done)\b", 80),
+]
+
 BROAD_TOOLS = {"Bash", "WebFetch", "Write", "Execute"}
 NETWORK_TOOL_NAMES = {"Fetch", "WebFetch", "Http", "HTTP", "Request", "Webhook", "Websocket", "Socket"}
 FILESYSTEM_TOOL_NAMES = {"Read", "Write", "Edit", "Filesystem", "File", "Open", "Path"}
@@ -66,6 +76,19 @@ def scan_config_value(path, findings, label, value):
         })
     is_server_node = "." not in label and "[" not in label
     if isinstance(value, dict):
+        for field in ("prompt", "system_prompt", "developer_prompt", "messages", "context", "instructions", "tool", "tools", "memory", "state"):
+            field_value = value.get(field)
+            if isinstance(field_value, str):
+                for rule, pattern, confidence in AGENT_SURFACE_PATTERNS:
+                    if re.search(pattern, field_value, re.IGNORECASE):
+                        findings.append({
+                            "category": "agentic_security",
+                            "rule": rule,
+                            "file": path,
+                            "line": None,
+                            "evidence_redacted": f"{label}.{field}",
+                            "base_confidence": confidence,
+                        })
         cmd = value.get("command")
         args = value.get("args")
         if is_server_node and (cmd or args):
@@ -121,6 +144,27 @@ def scan_config_value(path, findings, label, value):
                     "evidence_redacted": f"{label}: {tool_text}",
                     "base_confidence": 70,
                 })
+            if re.search(r"(?i)\b(shell|subprocess|bash|exec|run|command)\b", tool_text):
+                findings.append({
+                    "category": "agentic_security", "rule": "tool_to_shell_path",
+                    "file": path, "line": None,
+                    "evidence_redacted": f"{label}: {tool_text}",
+                    "base_confidence": 85,
+                })
+            if re.search(r"(?i)\b(read|write|edit|filesystem|file|open|path)\b", tool_text):
+                findings.append({
+                    "category": "agentic_security", "rule": "tool_to_filesystem_path",
+                    "file": path, "line": None,
+                    "evidence_redacted": f"{label}: {tool_text}",
+                    "base_confidence": 85,
+                })
+            if re.search(r"(?i)\b(fetch|http|https|request|browser|websocket|socket)\b", tool_text):
+                findings.append({
+                    "category": "agentic_security", "rule": "tool_to_network_path",
+                    "file": path, "line": None,
+                    "evidence_redacted": f"{label}: {tool_text}",
+                    "base_confidence": 85,
+                })
     for pat in INJECTION_PHRASES:
         if re.search(pat, text, re.IGNORECASE):
             findings.append({
@@ -160,6 +204,16 @@ def find_mcp_configs(repo_path, include_tests: bool = False, include_dependencie
 
 def scan_skill_md(path, findings):
     text = open(path, encoding="utf-8", errors="ignore").read()
+    for rule, pattern, confidence in AGENT_SURFACE_PATTERNS:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            findings.append({
+                "category": "agentic_security",
+                "rule": rule,
+                "file": path,
+                "line": None,
+                "evidence_redacted": match.group(0),
+                "base_confidence": confidence,
+            })
     # over-broad allowed-tools
     m = re.search(r"allowed-tools:\s*(.+)", text)
     if m:

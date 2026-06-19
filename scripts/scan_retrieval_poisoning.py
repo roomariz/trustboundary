@@ -26,6 +26,11 @@ INJECTION_PATTERNS = [
     ("retrieval_poisoning", "retrieval_policy_violation", r"(?i)\bignore safety checks\b", 85),
 ]
 
+AGENT_RETRIEVAL_PATTERNS = [
+    ("retrieval_prompt_surface", r"(?i)\b(retriev\w*|rag|corpus|document|context)\b.*\b(prompt|messages?|system prompt)\b", 75),
+    ("retrieval_tool_surface", r"(?i)\b(retriev\w*|rag|corpus|document|context)\b.*\b(tool|shell|network|filesystem)\b", 80),
+]
+
 EXTERNAL_URL_PATTERN = re.compile(r"(?i)\b(?:https?|ftp)://[^\s\"'<>]+")
 ALLOWLIST_PATTERNS = ("allowlist", "allow-list", "whitelist", "trusted-source", "trusted source")
 
@@ -64,6 +69,9 @@ def scan_file(path: str, findings):
 
     lines = text.splitlines()
     for lineno, line in enumerate(lines, start=1):
+        for rule, pattern, confidence in AGENT_RETRIEVAL_PATTERNS:
+            if re.search(pattern, line):
+                _append(findings, path, lineno, line.strip(), rule, confidence)
         for category, rule, pattern, confidence in INJECTION_PATTERNS:
             if re.search(pattern, line):
                 _append(findings, path, lineno, line.strip(), rule, confidence)

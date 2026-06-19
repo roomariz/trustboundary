@@ -42,6 +42,11 @@ UNSAFE_MEMORY_PATTERNS = [
     ("unsafe_memory_write", r"(?i)\bunrestricted\b.*\bmemory\b.*\b(update|write)\b", 90),
 ]
 
+AGENT_MEMORY_SURFACE_PATTERNS = [
+    ("memory_prompt_context_surface", r"(?i)\b(memory|state|history|session)\b.*\b(prompt|context)\b", 75),
+    ("memory_tool_surface", r"(?i)\b(memory|state|history|session)\b.*\b(tool|shell|network|filesystem)\b", 75),
+]
+
 SENSITIVE_MEMORY_PATTERNS = [
     ("sensitive_memory_storage", r"(?i)\b(api[_ -]?key|access[_ -]?token|auth[_ -]?token|refresh[_ -]?token|secret|credential|password)\b", 95),
     ("sensitive_memory_storage", r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", 80),
@@ -78,6 +83,9 @@ def scan_file(path: str, findings):
         return
 
     for lineno, line in enumerate(text.splitlines(), start=1):
+        for rule, pattern, confidence in AGENT_MEMORY_SURFACE_PATTERNS:
+            if re.search(pattern, line):
+                _append(findings, path, lineno, line.strip(), rule, confidence)
         for rule, pattern, confidence in PERSISTENT_PROMPT_PATTERNS:
             if re.search(pattern, line):
                 _append(findings, path, lineno, line.strip(), rule, confidence)

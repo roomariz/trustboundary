@@ -39,6 +39,7 @@ SCANNER_MODULES = [
     "scan_retrieval_poisoning",
     "scan_skills_and_mcp",
     "scan_frameworks",
+    "scan_infrastructure",
 ]
 
 CATEGORY_METADATA = {
@@ -132,6 +133,11 @@ CATEGORY_METADATA = {
         "recommendation": "Lock down workflow permissions, secret handling, and pipeline triggers before release.",
         "trust_boundary": ["deployment", "execution", "credentials"],
     },
+    "infrastructure_security": {
+        "impact": "Infrastructure and deployment configuration may expose hosts, cloud resources, or tenant data.",
+        "recommendation": "Tighten infrastructure defaults, pin deployment behavior, and remove risky runtime privileges before release.",
+        "trust_boundary": ["container", "deployment", "configuration"],
+    },
 }
 
 RULE_RECOMMENDATIONS = {
@@ -145,6 +151,20 @@ RULE_RECOMMENDATIONS = {
     "os_system": "Replace os.system with a structured process API and explicit argument handling.",
     "env_access": "Read configuration from the environment intentionally, validate missing values, and keep secrets out of source files.",
     "dotenv_usage": "Use dotenv only for local development and avoid treating .env as a production secret source.",
+    "docker_socket_mount": "Avoid mounting the Docker socket into containers unless the workflow is explicitly trusted and isolated.",
+    "host_filesystem_mount": "Avoid bind-mounting host paths into containers unless the path is explicitly allowlisted and necessary.",
+    "privileged_container": "Drop privileged mode and the Docker default capabilities unless there is a tightly controlled exception.",
+    "container_root_user": "Run containers as a non-root user and set a read-only filesystem where possible.",
+    "missing_read_only_rootfs": "Enable a read-only root filesystem for containers unless write access is strictly required.",
+    "untrusted_deploy_command": "Avoid shelling deployment commands from untrusted workflow inputs; use allowlists and explicit arguments.",
+    "unpinned_action": "Pin GitHub Actions by commit SHA so upstream changes cannot silently alter workflow behavior.",
+    "broad_iam_permissions": "Scope cloud and IAM permissions to the minimum required actions and resources.",
+    "public_database_storage": "Require authentication and tenant scoping before exposing database or storage resources.",
+    "missing_rls_indicator": "Enable and document row-level security for multi-tenant Supabase data access.",
+    "k8s_privileged_pod": "Remove privileged pod settings and tighten the pod security context.",
+    "k8s_hostpath_mount": "Replace hostPath mounts with safer volume types unless host access is explicitly required.",
+    "k8s_host_networking": "Disable hostNetwork, hostPID, and hostIPC unless the workload absolutely requires them.",
+    "k8s_missing_resource_limits": "Set CPU and memory requests and limits for production workloads.",
 }
 
 SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
@@ -509,6 +529,8 @@ def _finding_evidence_summary(finding):
         "why_detected": finding.get("evidence_snippet") or finding.get("evidence_redacted") or "Pattern matched by scanner heuristic.",
         "impacted_trust_boundary": finding.get("trust_boundary", ["unknown"]),
         "confidence_bucket": finding.get("confidence_bucket") or "Unknown",
+        "confidence_score": finding.get("confidence_score"),
+        "confidence_band": finding.get("confidence_band") or finding.get("confidence_level"),
         "remediation": finding.get("recommendation"),
         "evidence_snippet": snippet,
     }
@@ -524,6 +546,27 @@ def _finding_evidence_summary(finding):
         "missing_evidence": finding.get("missing_evidence"),
         "proof_status": finding.get("proof_status"),
         "boundary_crossing": finding.get("boundary_crossing"),
+        "agent_surface": finding.get("agent_surface"),
+        "prompt_evidence": finding.get("prompt_evidence"),
+        "retrieval_evidence": finding.get("retrieval_evidence"),
+        "memory_evidence": finding.get("memory_evidence"),
+        "tool_evidence": finding.get("tool_evidence"),
+        "mcp_evidence": finding.get("mcp_evidence"),
+        "execution_evidence": finding.get("execution_evidence"),
+        "filesystem_evidence": finding.get("filesystem_evidence"),
+        "network_egress_evidence": finding.get("network_egress_evidence"),
+        "sensitive_data_evidence": finding.get("sensitive_data_evidence"),
+        "tenant_data_evidence": finding.get("tenant_data_evidence"),
+        "controls_observed": finding.get("controls_observed"),
+        "controls_missing": finding.get("controls_missing"),
+        "attack_path": finding.get("attack_path"),
+        "proof_status": finding.get("proof_status"),
+        "finding_class": finding.get("finding_class"),
+        "evidence_level": finding.get("evidence_level"),
+        "confidence_reason": finding.get("confidence_reason"),
+        "boundary_crossing": finding.get("boundary_crossing"),
+        "evidence_components": finding.get("evidence_components"),
+        "missing_evidence": finding.get("missing_evidence"),
     })
     return summary
 
@@ -625,7 +668,9 @@ def _path_classes(finding):
             source_class = "unauthenticated_user"
         elif rule in {"route_with_auth_middleware", "route_with_role_check", "route_with_permission_check", "route_with_ownership_check", "route_with_tenant_check"}:
             source_class = "authenticated_session"
-        elif rule in {"unauthenticated_route", "unrestricted_admin_endpoint", "object_id_access", "missing_tenant_filters", "tenant_scoped_query"}:
+        elif rule in {"route_with_tenant_check", "tenant_scoped_query"}:
+            source_class = "tenant_context"
+        elif rule in {"unauthenticated_route", "unrestricted_admin_endpoint", "object_id_access", "missing_tenant_filters"}:
             source_class = "route_handler"
         if rule in {"object_id_access", "route_with_ownership_check"}:
             sink_class = "object_resource"
@@ -705,17 +750,21 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         scope_tags = sorted(set(finding.get("scope_tags") or []) | set(path_scope_tags(path, repo_config)))
         finding_class = finding.get("finding_class", "potential_risk")
         evidence_level = finding.get("evidence_level") or ("proven" if finding_class == "confirmed_vulnerability" else "partial" if finding_class == "potential_risk" else "capability")
+        infra_confirmed = finding.get("category") in {"container_security", "ci_cd_security", "infrastructure_as_code"} and finding.get("confidence_score", 0) >= 80
         if finding.get("rule") in {"network_client_usage", "websocket_client_usage", "environment_variable_access", "credential_env_passthrough", "filesystem_read_access", "recursive_filesystem_operation"} and finding.get("proof_status") in {"source_only", "sink_only"}:
             finding_class = "observed_capability"
             evidence_level = "capability"
         elif finding.get("proof_status") in {"implicit", "controlled"} and finding_class != "confirmed_vulnerability":
             finding_class = "potential_risk"
             evidence_level = "partial"
+        elif infra_confirmed:
+            finding_class = "confirmed_vulnerability"
+            evidence_level = "proven"
         elif finding.get("proof_status") == "explicit" and finding_class != "observed_capability":
             finding_class = "confirmed_vulnerability"
             evidence_level = "proven"
         trust_score_penalty = {"observed_capability": 0, "potential_risk": 1, "confirmed_vulnerability": 1}[finding_class]
-        production_blocker = finding["severity"] == "Critical" or (finding["severity"] == "High" and finding["confidence_level"] == BLOCKING_CONFIDENCE)
+        production_blocker = finding["severity"] == "Critical" or (finding["severity"] == "High" and finding.get("confidence_band") == "HIGH")
         if finding_class != "confirmed_vulnerability":
             production_blocker = False
         if finding["rule"] == "shell_true":
@@ -737,7 +786,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "remediation_priority": REMEDIATION_PRIORITY.get(finding["severity"], "RECOMMENDED"),
             "trust_boundary": metadata.get("trust_boundary", ["unknown"]),
             "production_blocker": production_blocker,
-            "finding_class": finding_class,
+            "finding_class": "confirmed_vulnerability" if infra_confirmed else finding_class,
             "evidence_level": evidence_level,
             "trust_score_penalty": trust_score_penalty,
             "evidence_redacted": _redact_sensitive_text(finding.get("evidence_redacted") or finding.get("evidence")),
@@ -746,6 +795,20 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
                 "impact": metadata.get("impact", "Review the finding and validate whether it is a real risk."),
                 "recommendation": RULE_RECOMMENDATIONS.get(finding["rule"], metadata.get("recommendation", "Review the flagged code or configuration and reduce the risky pattern.")),
             }),
+            "infrastructure_surface": finding.get("infrastructure_surface"),
+            "config_file": finding.get("config_file"),
+            "config_key": finding.get("config_key"),
+            "observed_evidence": finding.get("observed_evidence"),
+            "missing_evidence": finding.get("missing_evidence"),
+            "controls_observed": finding.get("controls_observed"),
+            "controls_missing": finding.get("controls_missing"),
+            "boundary_crossing": finding.get("boundary_crossing") or infra_confirmed,
+            "proof_status": finding.get("proof_status"),
+            "finding_class": finding.get("finding_class"),
+            "evidence_level": finding.get("evidence_level"),
+            "confidence_score": finding.get("confidence_score"),
+            "confidence_band": finding.get("confidence_band"),
+            "confidence_reason": finding.get("confidence_reason"),
             **_finding_evidence_summary(finding),
         })
     return {"findings": findings, "correlations": scored["correlations"]}
@@ -835,6 +898,8 @@ def is_documentation_finding(finding):
 
 
 def decision_inputs(findings):
+    def _confidence_band(finding):
+        return finding.get("confidence_band") or finding.get("confidence_level")
     production_findings = [finding for finding in findings if finding.get("finding_class") != "observed_capability" and not is_documentation_finding(finding)]
     accepted = [finding for finding in production_findings if finding.get("status") == "accepted_risk" and finding.get("severity") != "Critical" and finding.get("category") != "leaked_secrets"]
     production_findings = [finding for finding in production_findings if finding not in accepted]
@@ -847,7 +912,7 @@ def decision_inputs(findings):
                 finding.get("finding_class") == "confirmed_vulnerability"
                 and (
                     finding.get("severity") == "Critical"
-                    or (finding.get("severity") == "High" and finding.get("confidence_level") in {"MEDIUM", "HIGH"})
+                or (finding.get("severity") == "High" and _confidence_band(finding) in {"MEDIUM", "HIGH"})
                 )
             )
             or (finding.get("category") == "leaked_secrets" and finding.get("severity") == "Critical")
@@ -861,10 +926,10 @@ def decision_inputs(findings):
             finding.get("finding_class") == "potential_risk"
             and (
                 finding.get("severity") in {"High", "Critical"}
-                or finding.get("confidence_level") in {"MEDIUM", "HIGH"}
+                or _confidence_band(finding) in {"MEDIUM", "HIGH"}
                 or finding.get("category") in {"unsafe_execution", "leaked_secrets", "agentic_security", "mcp_tool_abuse", "retrieval_poisoning", "data_exfiltration"}
             )
-            or (finding.get("finding_class") == "confirmed_vulnerability" and finding.get("confidence_level") == "LOW")
+            or (finding.get("finding_class") == "confirmed_vulnerability" and _confidence_band(finding) == "LOW")
         )
     ]
     return production_findings, blockers, review_items
@@ -892,7 +957,7 @@ def readiness_decision(findings, audit_warnings=None):
             "decision_reasons": decision_reasons,
         }
     if review_items:
-        if any(finding.get("severity") in {"High", "Critical"} and finding.get("confidence_level") in {"MEDIUM", "HIGH"} for finding in review_items):
+        if any(finding.get("severity") in {"High", "Critical"} and finding.get("confidence_band") in {"MEDIUM", "HIGH"} for finding in review_items):
             decision_reasons.append("High-confidence production risks require review before release.")
         else:
             decision_reasons.append("Production review items remain.")
@@ -966,6 +1031,170 @@ def auth_review_summary(findings):
     }
 
 
+def _map_entry(component, evidence, confidence_score, partial_evidence=False, inferred=False, related_findings=None, confidence_band_override=None):
+    band = confidence_band_override or ("HIGH" if confidence_score >= 80 else "MEDIUM" if confidence_score >= 50 else "LOW")
+    return {
+        "component": component,
+        "evidence": evidence,
+        "confidence_score": confidence_score,
+        "confidence_band": band,
+        "partial_evidence": partial_evidence,
+        "inferred": inferred,
+        "related_findings": related_findings or [],
+    }
+
+
+def _unknown_map_entry(component, related_findings=None):
+    return _map_entry(
+        component,
+        "No direct evidence observed in the scanned repository.",
+        0,
+        partial_evidence=True,
+        inferred=False,
+        related_findings=related_findings or [],
+        confidence_band_override="UNKNOWN",
+    )
+
+
+def _build_repository_map(findings, matcher, unknown_component):
+    matched = [finding for finding in findings if matcher(finding)]
+    if not matched:
+        return [_unknown_map_entry(unknown_component)]
+
+    entries = []
+    for finding in matched:
+        evidence = (
+            finding.get("evidence_redacted")
+            or finding.get("evidence_snippet")
+            or finding.get("observed_evidence")
+            or finding.get("evidence")
+            or "Observed repository evidence."
+        )
+        entries.append(_map_entry(
+            finding.get("route_or_handler") or finding.get("framework") or finding.get("rule"),
+            evidence,
+            finding.get("confidence_score") or finding.get("confidence", 0) or 0,
+            partial_evidence=finding.get("proof_status") in {"implicit", "source_only", "sink_only", "partial"},
+            inferred=finding.get("proof_status") in {"implicit", "source_only", "sink_only"} or finding.get("finding_class") == "potential_risk",
+            related_findings=[finding.get("id")] if finding.get("id") else [],
+        ))
+    return entries
+
+
+def repository_understanding_summary(findings):
+    auth_findings = [finding for finding in findings if finding.get("category") == "framework_security"]
+    agent_findings = [finding for finding in findings if finding.get("category") in {"prompt_injection", "retrieval_poisoning", "mcp_tool_abuse", "agentic_security"}]
+    infra_findings = [finding for finding in findings if finding.get("category") in {"container_security", "ci_cd_security", "infrastructure_as_code"}]
+    auth_review = auth_review_summary(findings)
+    tenant_review = tenant_isolation_review_summary(findings)
+
+    return {
+        "authentication_map": _build_repository_map(
+            auth_findings,
+            lambda finding: finding.get("rule") in {"route_with_auth_middleware", "public_route_marked_public", "unauthenticated_route"},
+            "authentication",
+        ),
+        "authorisation_map": _build_repository_map(
+            auth_findings,
+            lambda finding: finding.get("rule") in {"route_with_role_check", "route_with_ownership_check", "route_with_tenant_check", "object_id_access", "unrestricted_admin_endpoint", "confirmed_auth_bypass", "missing_tenant_filters", "tenant_scoped_query"},
+            "authorisation",
+        ),
+        "data_flow_map": _build_repository_map(
+            findings,
+            lambda finding: bool(finding.get("source") or finding.get("sink") or finding.get("flow_path")),
+            "data flow",
+        ),
+        "trust_boundary_map": _build_repository_map(
+            findings,
+            lambda finding: bool(finding.get("boundary_crossing") or finding.get("trust_boundary") or finding.get("boundary")),
+            "trust boundary",
+        ),
+        "agent_map": _build_repository_map(
+            agent_findings,
+            lambda finding: True,
+            "agent",
+        ),
+        "infrastructure_map": _build_repository_map(
+            infra_findings,
+            lambda finding: True,
+            "infrastructure",
+        ),
+        "repository_understanding": [
+            _map_entry(
+                "authentication",
+                "Observed from framework, route, and dependency evidence where available.",
+                auth_review["protected_routes"] + auth_review["routes_requiring_review"],
+                partial_evidence=auth_review["public_routes"] == 0 or auth_review["routes_requiring_review"] > 0,
+                inferred=auth_review["routes_requiring_review"] > 0,
+                related_findings=[finding.get("id") for finding in auth_findings if finding.get("id")][:10],
+            ),
+            _map_entry(
+                "authorisation",
+                "Observed from role, ownership, tenant, and object-access evidence where available.",
+                tenant_review["tenant_controls_detected"] + tenant_review["confirmed_cross_tenant_findings"],
+                partial_evidence=tenant_review["tenant_review_count"] > 0,
+                inferred=tenant_review["confirmed_cross_tenant_findings"] > 0,
+                related_findings=[finding.get("id") for finding in auth_findings if finding.get("id")][:10],
+            ),
+            _map_entry(
+                "data flow",
+                "Observed from source, sink, and flow-path evidence where available.",
+                sum(1 for finding in findings if finding.get("source") or finding.get("sink") or finding.get("flow_path")),
+                partial_evidence=True,
+                inferred=any(finding.get("finding_class") == "potential_risk" for finding in findings),
+                related_findings=[finding.get("id") for finding in findings if finding.get("id")][:10],
+            ),
+            _map_entry(
+                "trust boundaries",
+                "Observed from boundary-crossing evidence and trust-zone relationships where available.",
+                sum(1 for finding in findings if finding.get("boundary_crossing")),
+                partial_evidence=any(finding.get("proof_status") in {"implicit", "source_only", "sink_only"} for finding in findings),
+                inferred=any(finding.get("finding_class") == "potential_risk" for finding in findings),
+                related_findings=[finding.get("id") for finding in findings if finding.get("boundary_crossing")][:10],
+            ),
+            _map_entry(
+                "agent surfaces",
+                "Observed from prompts, retrieval, memory, tools, MCP, and execution evidence where available.",
+                len(agent_findings),
+                partial_evidence=any(finding.get("proof_status") in {"implicit", "partial"} for finding in agent_findings),
+                inferred=bool(agent_findings),
+                related_findings=[finding.get("id") for finding in agent_findings if finding.get("id")][:10],
+            ),
+            _map_entry(
+                "infrastructure",
+                "Observed from CI/CD, containers, Kubernetes, Terraform, and Supabase evidence where available.",
+                len(infra_findings),
+                partial_evidence=any(finding.get("proof_status") in {"implicit", "partial"} for finding in infra_findings),
+                inferred=bool(infra_findings),
+                related_findings=[finding.get("id") for finding in infra_findings if finding.get("id")][:10],
+            ),
+        ],
+    }
+
+
+def tenant_isolation_review_summary(findings):
+    tenant_findings = [finding for finding in findings if any(
+        finding.get(field) for field in (
+            "tenant_identifier",
+            "tenant_evidence",
+            "tenant_propagation_evidence",
+            "query_scope_evidence",
+            "retrieval_scope_evidence",
+            "ownership_scope_evidence",
+            "tenant_control_evidence",
+        )
+    ) or finding.get("rule") in {"route_with_tenant_check", "tenant_scoped_query", "missing_tenant_filters"}]
+    confirmed = [finding for finding in tenant_findings if finding.get("finding_class") == "confirmed_vulnerability"]
+    review = [finding for finding in tenant_findings if finding.get("finding_class") in {"potential_risk", "observed_capability"}]
+    controls = [finding for finding in tenant_findings if finding.get("tenant_control_evidence") or finding.get("tenant_evidence") or finding.get("query_scope_evidence") or finding.get("ownership_scope_evidence")]
+    return {
+        "tenant_controls_detected": len(controls),
+        "tenant_review_count": len(review),
+        "confirmed_cross_tenant_findings": len(confirmed),
+        "tenant_findings": tenant_findings,
+    }
+
+
 def attack_surface_summary(findings):
     categories = Counter(f["category"] for f in findings)
     scopes = Counter(f.get("scope", "production") for f in findings)
@@ -1013,7 +1242,7 @@ def _trust_score_deductions(findings):
             if category == "mcp_tool_abuse":
                 base += 4
             if category == "leaked_secrets":
-                base += 8
+                base += 12
             if is_documentation_finding(finding):
                 base = doc_weight.get(severity, 2) + (1 if confidence == "HIGH" else 0)
         deductions.append({
@@ -1290,6 +1519,12 @@ def trust_paths(findings):
         ("retrieval", "prompt", "High", "Retrieved content can influence prompt construction."),
         ("retrieval", "tool", "High", "Retrieved content can influence tool use."),
         ("retrieval", "execution", "High", "Retrieved content can influence execution paths."),
+        ("tenant_context", "query", "High", "Tenant context can influence database queries."),
+        ("tenant_context", "retrieval", "High", "Tenant context can influence retrieval scoping."),
+        ("tenant_context", "repository", "High", "Tenant context can influence repository access."),
+        ("tenant_data", "prompt", "High", "Tenant data can influence prompt construction."),
+        ("tenant_data", "tool", "High", "Tenant data can influence agent tool use."),
+        ("tenant_data", "network", "High", "Tenant data can influence external requests."),
         ("tool", "execution", "High", "Tool-originated input can reach execution sinks."),
         ("tool", "filesystem", "Medium", "Tool-originated input can reach filesystem mutation."),
         ("tool", "credential", "High", "Tool-originated input can reach credential exposure."),
@@ -1753,6 +1988,8 @@ def _graph_trust_zone(label: str):
         "environment_variable": "secrets_environment",
         "file_contents": "local_filesystem",
         "mcp_response": "agent_tool_runtime",
+        "tenant_context": "tenant_context",
+        "tenant_data": "tenant_data",
         "agent": "application_code",
     }
     return zone_map.get(label, "application_code")
@@ -1816,8 +2053,115 @@ def build_trust_boundary_graph(findings, trust_paths_items=None):
             "secret_leakage": "tenant_data",
             "leaked_secrets": "tenant_data",
             "agentic_security": "application_code",
+            "container_security": "container_runtime",
+            "ci_cd_security": "ci_workflow",
+            "infrastructure_as_code": "cloud_control_plane",
         }.get(finding.get("category"), "application_code")
         add_node(finding["id"], node_type, finding.get("rule") or finding["category"], finding=finding, trust_zone=trust_zone)
+        if finding.get("category") == "ci_cd_security":
+            if finding.get("rule") in {"pull_request_target_secret_exposure", "secret_environment_use"}:
+                add_node("secrets_environment", "context", "Secrets Environment", trust_zone="secrets_environment")
+                make_edge(
+                    f"{finding['id']}:secrets",
+                    finding["id"],
+                    "secrets_environment",
+                    "ci_workflow -> secrets_environment",
+                    True,
+                    "ci_workflow",
+                    "secrets_environment",
+                    finding=finding,
+                    partial_evidence=finding.get("finding_class") != "confirmed_vulnerability",
+                    evidence=finding.get("observed_evidence") or finding.get("evidence_redacted"),
+                    trust_boundary="secrets_environment",
+                )
+            if finding.get("rule") in {"dangerous_ci_command", "untrusted_input_deploy"}:
+                add_node("deployment_target", "deployment", "Deployment Target", trust_zone="deployment")
+                make_edge(
+                    f"{finding['id']}:deploy",
+                    finding["id"],
+                    "deployment_target",
+                    "ci_workflow -> deployment_target",
+                    True,
+                    "ci_workflow",
+                    "deployment",
+                    finding=finding,
+                    partial_evidence=finding.get("finding_class") != "confirmed_vulnerability",
+                    evidence=finding.get("observed_evidence") or finding.get("evidence_redacted"),
+                    trust_boundary="deployment_target",
+                )
+            add_node("shell_runtime", "runtime", "Shell Runtime", trust_zone="shell_runtime")
+            make_edge(
+                f"{finding['id']}:shell",
+                finding["id"],
+                "shell_runtime",
+                "ci_workflow -> shell_runtime",
+                finding.get("rule") in {"dangerous_ci_command", "untrusted_input_deploy"},
+                "ci_workflow",
+                "shell_runtime",
+                finding=finding,
+                partial_evidence=finding.get("finding_class") != "confirmed_vulnerability",
+                evidence=finding.get("observed_evidence") or finding.get("evidence_redacted"),
+                trust_boundary="shell_runtime",
+            )
+        if finding.get("category") == "container_security":
+            add_node("host_filesystem", "host", "Host Filesystem", trust_zone="host_filesystem")
+            add_node("external_network", "network", "External Network", trust_zone="external_network")
+            make_edge(
+                f"{finding['id']}:hostfs",
+                finding["id"],
+                "host_filesystem",
+                "container_runtime -> host_filesystem",
+                finding.get("rule") in {"docker_socket_mount", "k8s_hostpath_mount"},
+                "container_runtime",
+                "host_filesystem",
+                finding=finding,
+                partial_evidence=finding.get("finding_class") != "confirmed_vulnerability",
+                evidence=finding.get("observed_evidence") or finding.get("evidence_redacted"),
+                trust_boundary="host_filesystem",
+            )
+            make_edge(
+                f"{finding['id']}:network",
+                finding["id"],
+                "external_network",
+                "container_runtime -> external_network",
+                True,
+                "container_runtime",
+                "external_network",
+                finding=finding,
+                partial_evidence=finding.get("finding_class") != "confirmed_vulnerability",
+                evidence=finding.get("observed_evidence") or finding.get("evidence_redacted"),
+                trust_boundary="external_network",
+            )
+        if finding.get("category") == "infrastructure_as_code":
+            add_node("cloud_resource", "resource", "Cloud Resource", trust_zone="cloud_resource")
+            make_edge(
+                f"{finding['id']}:cloud",
+                finding["id"],
+                "cloud_resource",
+                "terraform_config -> cloud_resource",
+                True,
+                "cloud_control_plane",
+                "cloud_resource",
+                finding=finding,
+                partial_evidence=finding.get("finding_class") != "confirmed_vulnerability",
+                evidence=finding.get("observed_evidence") or finding.get("evidence_redacted"),
+                trust_boundary="cloud_resource",
+            )
+        if finding.get("category") == "infrastructure_as_code" and finding.get("infrastructure_surface") == "Supabase":
+            add_node("tenant_data", "data_store", "Tenant Data", trust_zone="tenant_data")
+            make_edge(
+                f"{finding['id']}:tenant",
+                finding["id"],
+                "tenant_data",
+                "supabase_config -> tenant_data",
+                True,
+                "cloud_control_plane",
+                "tenant_data",
+                finding=finding,
+                partial_evidence=finding.get("finding_class") != "confirmed_vulnerability",
+                evidence=finding.get("observed_evidence") or finding.get("evidence_redacted"),
+                trust_boundary="tenant_data",
+            )
         if finding.get("category") == "framework_security":
             rule = finding.get("rule")
             if rule == "public_route_marked_public":
@@ -1895,6 +2239,96 @@ def build_trust_boundary_graph(findings, trust_paths_items=None):
                         evidence=finding.get("tenant_check_evidence") or finding.get("evidence_redacted"),
                         trust_boundary="tenant_data",
                     )
+                    add_node("tenant_context", "context", "Tenant Context", trust_zone="tenant_context")
+                    make_edge(
+                        f"{finding['id']}:tenant_context",
+                        "tenant_context",
+                        finding["id"],
+                        "tenant_context",
+                        bool(finding.get("tenant_check_evidence")),
+                        "tenant_context",
+                        "application_code",
+                        finding=finding,
+                        partial_evidence=not finding.get("tenant_check_evidence"),
+                        evidence=finding.get("tenant_check_evidence") or finding.get("evidence_redacted"),
+                        trust_boundary="tenant_context",
+                    )
+                    if rule in {"tenant_scoped_query", "missing_tenant_filters"}:
+                        add_node("repository", "data_store", "Repository", trust_zone="tenant_data")
+                        make_edge(
+                            f"{finding['id']}:repo",
+                            "tenant_context",
+                            "repository",
+                            "tenant_context -> repository",
+                            bool(finding.get("tenant_check_evidence")),
+                            "tenant_context",
+                            "tenant_data",
+                            finding=finding,
+                            partial_evidence=not finding.get("tenant_check_evidence"),
+                            evidence=finding.get("tenant_check_evidence") or finding.get("evidence_redacted"),
+                            trust_boundary="repository",
+                        )
+                        add_node("query", "data_flow", "Query", trust_zone="tenant_data")
+                        make_edge(
+                            f"{finding['id']}:query",
+                            "tenant_context",
+                            "query",
+                            "tenant_context -> query",
+                            bool(finding.get("tenant_check_evidence")),
+                            "tenant_context",
+                            "tenant_data",
+                            finding=finding,
+                            partial_evidence=not finding.get("tenant_check_evidence"),
+                            evidence=finding.get("tenant_check_evidence") or finding.get("evidence_redacted"),
+                            trust_boundary="query",
+                        )
+                tenant_evidence = finding.get("tenant_check_evidence") or finding.get("tenant_evidence") or finding.get("ownership_check_evidence") or finding.get("authorization_evidence")
+                if tenant_evidence and finding.get("category") in {"retrieval_poisoning", "data_exfiltration", "agentic_security"}:
+                    add_node("tenant_data", "data_store", "Tenant Data", trust_zone="tenant_data")
+                    if finding.get("category") in {"retrieval_poisoning", "agentic_security"}:
+                        add_node("prompt_context", "context", "Prompt Context", trust_zone="llm_prompt_context")
+                        make_edge(
+                            f"{finding['id']}:prompt_context",
+                            "tenant_data",
+                            "prompt_context",
+                            "tenant_data -> prompt_context",
+                            True,
+                            "tenant_data",
+                            "llm_prompt_context",
+                            finding=finding,
+                            partial_evidence=False,
+                            evidence=tenant_evidence,
+                            trust_boundary="prompt_context",
+                        )
+                        add_node("agent_tool", "agent", "Agent Tool", trust_zone="agent_tool_runtime")
+                        make_edge(
+                            f"{finding['id']}:agent_tool",
+                            "tenant_data",
+                            "agent_tool",
+                            "tenant_data -> agent_tool",
+                            True,
+                            "tenant_data",
+                            "agent_tool_runtime",
+                            finding=finding,
+                            partial_evidence=False,
+                            evidence=tenant_evidence,
+                            trust_boundary="agent_tool",
+                        )
+                    if finding.get("category") == "data_exfiltration":
+                        add_node("external_network", "network", "External Network", trust_zone="external_network")
+                        make_edge(
+                            f"{finding['id']}:network",
+                            "tenant_data",
+                            "external_network",
+                            "tenant_data -> external_network",
+                            True,
+                            "tenant_data",
+                            "external_network",
+                            finding=finding,
+                            partial_evidence=False,
+                            evidence=tenant_evidence,
+                            trust_boundary="external_network",
+                        )
                 if rule == "unrestricted_admin_endpoint":
                     add_node("admin_user", "actor", "Admin User", trust_zone="trusted_session")
                     add_node("admin_action", "privileged_action", "Admin Action", trust_zone="application_code")
@@ -2114,6 +2548,118 @@ def attack_chains(trust_paths_items):
     return chains
 
 
+def _attack_path_status(finding):
+    finding_class = finding.get("finding_class")
+    evidence_level = (finding.get("evidence_level") or "").lower()
+    if finding_class == "confirmed_vulnerability":
+        return "confirmed"
+    if evidence_level == "partial" and finding.get("category") in {"retrieval_poisoning", "mcp_tool_abuse"}:
+        return "partial_evidence"
+    if finding_class == "potential_risk" and finding.get("boundary_crossing"):
+        return "review_required"
+    if evidence_level in {"partial", "capability"}:
+        return "partial_evidence"
+    return None
+
+
+def _attack_path_category(finding):
+    category = finding.get("category")
+    rule = finding.get("rule")
+    mapping = {
+        "data_exfiltration": "data_exfiltration",
+        "unsafe_execution": "command_execution",
+        "filesystem_mutation": "filesystem_write",
+        "prompt_injection": "prompt_injection",
+        "retrieval_poisoning": "retrieval_poisoning",
+        "agentic_security": "agent_tool_misuse",
+        "mcp_tool_abuse": "mcp_tool_abuse",
+        "framework_security": "auth_bypass" if rule in {"confirmed_auth_bypass", "unauthenticated_route", "unrestricted_admin_endpoint"} else None,
+        "tenant_isolation": "cross_tenant_access",
+        "leaked_secrets": "secrets_exposure",
+        "secret_leakage": "secrets_exposure",
+        "supply_chain": "supply_chain_execution",
+    }
+    if category == "framework_security" and rule in {"object_id_access"}:
+        return "object_access_bypass"
+    if category == "framework_security" and rule in {"missing_tenant_filters", "tenant_scoped_query"}:
+        return "cross_tenant_access"
+    return mapping.get(category)
+
+
+def attack_paths(findings, trust_paths_items=None, trust_boundary_graph=None, auth_review=None, tenant_review=None):
+    trust_paths_items = list(trust_paths_items or trust_paths(findings))
+    trust_boundary_graph = trust_boundary_graph or build_trust_boundary_graph(findings, trust_paths_items)
+    auth_review = auth_review or auth_review_summary(findings)
+    tenant_review = tenant_review or tenant_isolation_review_summary(findings)
+
+    eligible = []
+    for finding in findings:
+        status = _attack_path_status(finding)
+        category = _attack_path_category(finding)
+        if not status or not category:
+            continue
+        if finding.get("finding_class") == "observed_capability":
+            continue
+        if finding.get("finding_class") == "potential_risk" and not finding.get("boundary_crossing"):
+            continue
+        eligible.append((finding, status, category))
+
+    paths = []
+    for finding, status, category in eligible:
+        path_id = f"AP-{finding['id']}"
+        entry_point = finding.get("source") or finding.get("file") or "observed evidence"
+        sink = finding.get("sink") or finding.get("rule")
+        related_findings = [finding["id"]]
+        related_findings = sorted({item for item in related_findings if item})
+        path_steps = [finding.get("source") or "observed source"]
+        if finding.get("flow_path"):
+            path_steps = list(finding["flow_path"])
+        elif finding.get("boundary_crossing"):
+            path_steps.append(finding.get("sink") or "observed sink")
+        attack_boundary = finding.get("trust_boundary") or finding.get("boundary") or (trust_paths_items[0]["boundary"] if trust_paths_items else "Observed boundary")
+        missing_evidence = list(dict.fromkeys((finding.get("missing_evidence") or []) + ([] if status == "confirmed" else ["full end-to-end exploit proof"])))
+        remediation_summary = finding.get("recommendation") or finding.get("impact") or "Review and narrow the exposed trust boundary."
+        paths.append({
+            "attack_path_id": path_id,
+            "status": status,
+            "category": category,
+            "entry_point": entry_point,
+            "trust_boundary": attack_boundary,
+            "path_steps": path_steps,
+            "sink": sink,
+            "impact": finding.get("impact") or finding.get("recommendation") or "Potential security impact identified.",
+            "prerequisites": [finding.get("proof_status") or "observed evidence"],
+            "evidence": {
+                "source": finding.get("source"),
+                "sink": finding.get("sink"),
+                "flow_path": finding.get("flow_path"),
+                "boundary_crossing": finding.get("boundary_crossing"),
+                "evidence_level": finding.get("evidence_level"),
+                "finding_class": finding.get("finding_class"),
+                "confidence_score": finding.get("confidence_score"),
+                "trust_boundary_graph": {
+                    "node_count": len(trust_boundary_graph.get("nodes", [])),
+                    "edge_count": len(trust_boundary_graph.get("edges", [])),
+                    "boundary_crossing_count": trust_boundary_graph.get("summary", {}).get("boundary_crossing_count", 0),
+                },
+            },
+            "missing_evidence": missing_evidence,
+            "confidence_score": finding.get("confidence_score"),
+            "confidence_band": finding.get("confidence_band") or finding.get("confidence_level"),
+            "related_findings": related_findings,
+            "remediation_summary": remediation_summary,
+        })
+
+    paths.sort(key=lambda item: (0 if item["status"] == "confirmed" else 1 if item["status"] == "review_required" else 2, -int(item.get("confidence_score") or 0), item["attack_path_id"]))
+    summary = {
+        "confirmed": sum(1 for item in paths if item["status"] == "confirmed"),
+        "review_required": sum(1 for item in paths if item["status"] == "review_required"),
+        "partial_evidence": sum(1 for item in paths if item["status"] == "partial_evidence"),
+        "total": len(paths),
+    }
+    return {"paths": paths, "summary": summary}
+
+
 def required_fixes(findings):
     _, blockers, _ = decision_inputs(findings)
     items = blockers
@@ -2171,6 +2717,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     attack_surface = attack_surface_summary(findings)
     paths = trust_paths(findings)
     chains = attack_chains(paths)
+    attack_path_info = attack_paths(findings, trust_paths_items=paths, trust_boundary_graph=build_trust_boundary_graph(findings, paths), auth_review=auth_review_summary(findings), tenant_review=tenant_isolation_review_summary(findings))
     required = required_fixes(findings)
     recommended = recommended_fixes(findings)
     framework_items = framework_findings(findings)
@@ -2212,6 +2759,17 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     else:
         lines.append("  - None")
 
+    lines.extend([
+        "",
+        "## Confidence Legend",
+        "- HIGH means strong evidence supports the finding, usually including source, sink, path, missing control, and plausible impact.",
+        "- MEDIUM means meaningful risk indicators are present, but some proof is incomplete.",
+        "- LOW means capability or weak evidence was observed, but exploitability is not proven.",
+        "- Partial or inferred evidence cannot produce HIGH confidence.",
+        "- Observed controls reduce confidence.",
+        "- Confirmed critical secret exposure may still be HIGH where secret material is directly present.",
+    ])
+
     def _finding_block(finding):
         exposure = finding.get("exposure") or build_exposure(finding)
         lines_block = [
@@ -2219,7 +2777,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
             f"- Rule: {finding['rule']}",
             f"- Category: {finding['category']}",
             f"- Severity: {finding['severity']}",
-            f"- Confidence: {finding['confidence_level']}",
+            f"- Confidence: {finding.get('confidence_band') or finding.get('confidence_level') or 'LOW'} ({finding.get('confidence_score', 0)}/100)",
             f"- Confidence bucket: {finding.get('confidence_bucket') or 'Unknown'}",
             f"- Finding class: {finding.get('finding_class') or '-'}",
             f"- Evidence level: {finding.get('evidence_level') or '-'}",
@@ -2271,6 +2829,87 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         routes = [finding for finding in findings if finding.get("category") == "framework_security" and finding.get("rule") in {"unauthenticated_route", "unrestricted_admin_endpoint", "object_id_access", "missing_tenant_filters", "tenant_scoped_query"}]
         for finding in routes[:10]:
             lines.append(f"- {finding.get('http_method') or '-'} {finding.get('route_or_handler') or finding.get('rule')} - {finding.get('rule')}")
+
+    repository_maps = repository_understanding_summary(findings)
+    lines.extend([
+        "",
+        "## Repository Understanding",
+        "This section is evidence-only. Unknown areas, partial evidence, and inferred relationships are marked explicitly.",
+        "",
+        "### Authentication Map",
+    ])
+    for entry in repository_maps["authentication_map"]:
+        lines.append(f"- {entry['component']}: {entry['evidence']} [confidence {entry['confidence_band']} ({entry['confidence_score']}/100)]")
+        if entry["partial_evidence"] or entry["inferred"]:
+            markers = [label for label, enabled in (("partial evidence", entry["partial_evidence"]), ("inferred", entry["inferred"])) if enabled]
+            lines.append(f"  - Markers: {', '.join(markers)}")
+    lines.append("")
+    lines.append("### Authorisation Map")
+    for entry in repository_maps["authorisation_map"]:
+        lines.append(f"- {entry['component']}: {entry['evidence']} [confidence {entry['confidence_band']} ({entry['confidence_score']}/100)]")
+        if entry["partial_evidence"] or entry["inferred"]:
+            markers = [label for label, enabled in (("partial evidence", entry["partial_evidence"]), ("inferred", entry["inferred"])) if enabled]
+            lines.append(f"  - Markers: {', '.join(markers)}")
+    lines.append("")
+    lines.append("### Data Flow Map")
+    for entry in repository_maps["data_flow_map"]:
+        lines.append(f"- {entry['component']}: {entry['evidence']} [confidence {entry['confidence_band']} ({entry['confidence_score']}/100)]")
+        if entry["partial_evidence"] or entry["inferred"]:
+            markers = [label for label, enabled in (("partial evidence", entry["partial_evidence"]), ("inferred", entry["inferred"])) if enabled]
+            lines.append(f"  - Markers: {', '.join(markers)}")
+    lines.append("")
+    lines.append("### Trust Boundary Map")
+    for entry in repository_maps["trust_boundary_map"]:
+        lines.append(f"- {entry['component']}: {entry['evidence']} [confidence {entry['confidence_band']} ({entry['confidence_score']}/100)]")
+        if entry["partial_evidence"] or entry["inferred"]:
+            markers = [label for label, enabled in (("partial evidence", entry["partial_evidence"]), ("inferred", entry["inferred"])) if enabled]
+            lines.append(f"  - Markers: {', '.join(markers)}")
+    lines.append("")
+    lines.append("### Agent Map")
+    for entry in repository_maps["agent_map"]:
+        lines.append(f"- {entry['component']}: {entry['evidence']} [confidence {entry['confidence_band']} ({entry['confidence_score']}/100)]")
+        if entry["partial_evidence"] or entry["inferred"]:
+            markers = [label for label, enabled in (("partial evidence", entry["partial_evidence"]), ("inferred", entry["inferred"])) if enabled]
+            lines.append(f"  - Markers: {', '.join(markers)}")
+    lines.append("")
+    lines.append("### Infrastructure Map")
+    for entry in repository_maps["infrastructure_map"]:
+        lines.append(f"- {entry['component']}: {entry['evidence']} [confidence {entry['confidence_band']} ({entry['confidence_score']}/100)]")
+        if entry["partial_evidence"] or entry["inferred"]:
+            markers = [label for label, enabled in (("partial evidence", entry["partial_evidence"]), ("inferred", entry["inferred"])) if enabled]
+            lines.append(f"  - Markers: {', '.join(markers)}")
+
+    tenant_review = tenant_isolation_review_summary(findings)
+    lines.extend([
+        "",
+        "## Multi-Tenant Isolation Review",
+        f"- Tenant controls detected: {tenant_review['tenant_controls_detected']}",
+        f"- Tenant-scoped queries detected: {sum(1 for finding in tenant_review['tenant_findings'] if finding.get('rule') == 'tenant_scoped_query')}",
+        f"- Unscoped queries requiring review: {sum(1 for finding in tenant_review['tenant_findings'] if finding.get('rule') == 'missing_tenant_filters')}",
+        f"- Retrieval isolation concerns: {sum(1 for finding in tenant_review['tenant_findings'] if finding.get('retrieval_scope_evidence') or finding.get('category') == 'retrieval_poisoning')}",
+        f"- Prompt isolation concerns: {sum(1 for finding in tenant_review['tenant_findings'] if finding.get('category') in {'retrieval_poisoning', 'agentic_security'} and finding.get('tenant_evidence'))}",
+        f"- Confirmed cross-tenant risks: {tenant_review['confirmed_cross_tenant_findings']}",
+    ])
+
+    infrastructure_findings = [finding for finding in findings if finding.get("category") in {"container_security", "ci_cd_security", "infrastructure_as_code"}]
+    confirmed_infra = [finding for finding in infrastructure_findings if finding.get("finding_class") == "confirmed_vulnerability"]
+    blockers = [finding for finding in infrastructure_findings if finding.get("production_blocker")]
+    lines.extend([
+        "",
+        "## Infrastructure Security Review",
+        f"- Infrastructure files detected: {scope_summary.get('infrastructure_files_detected', 0)}",
+        f"- Container risks: {sum(1 for finding in infrastructure_findings if finding.get('category') == 'container_security')}",
+        f"- CI/CD risks: {sum(1 for finding in infrastructure_findings if finding.get('category') == 'ci_cd_security')}",
+        f"- Kubernetes/Helm risks: {sum(1 for finding in infrastructure_findings if finding.get('infrastructure_surface') in {'Kubernetes', 'Helm'})}",
+        f"- Terraform/cloud risks: {sum(1 for finding in infrastructure_findings if finding.get('infrastructure_surface') == 'Terraform')}",
+        f"- Supabase risks: {sum(1 for finding in infrastructure_findings if finding.get('infrastructure_surface') == 'Supabase')}",
+        f"- Confirmed infrastructure blockers: {len(blockers)}",
+    ])
+    if confirmed_infra:
+        for finding in confirmed_infra[:10]:
+            lines.append(f"- {finding['id']} - {finding['rule']} ({finding['severity']}, {finding['confidence_level']})")
+    else:
+        lines.append("- None")
 
     lines.extend([
         "",
@@ -2339,21 +2978,23 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     lines.extend([
         "## Attack Paths",
     ])
-    if paths:
-        for path in paths:
-            related_findings = [finding for finding in findings if finding["id"] in set(path.get("evidence", []))]
-            heading = finding_heading(related_findings[0]) if related_findings else f"[{path.get('risk', 'Unknown')}] {path['boundary']}"
-            lines.append(f"- {heading}: {path['source']} -> {path['sink']} ({path['risk']}, confidence {path.get('confidence_score', '-')})")
-            if explain:
-                lines.append(f"  - Source: {path['source']}")
-                lines.append(f"  - Boundary crossed: {path['boundary']}")
-                lines.append(f"  - Sink: {path['sink']}")
-                lines.append(f"  - Trigger condition: {path['data_flow_summary']}")
-                lines.append("  - Likely attacker action: Poison input or steer repository-controlled data into the sink.")
-                lines.append("  - Business impact: Data exfiltration, unsafe execution, or privilege expansion.")
-                lines.append("  - Recommended mitigation: Use allowlists, validation, and human approval gates.")
+    if attack_path_info["paths"]:
+        for status in ["confirmed", "review_required", "partial_evidence"]:
+            status_paths = [path for path in attack_path_info["paths"] if path["status"] == status]
+            if not status_paths:
+                continue
+            lines.append(f"### {status.replace('_', ' ').title()}")
+            for path in status_paths:
+                lines.append(f"- {path['attack_path_id']} | {path['category']} | {path['entry_point']} -> {path['sink']} | {path['confidence_band']} ({path['confidence_score']}/100)")
+                lines.append(f"  - Boundary: {path['trust_boundary']}")
+                lines.append(f"  - Steps: {' -> '.join(path['path_steps']) if path['path_steps'] else '-'}")
+                lines.append(f"  - Impact: {path['impact']}")
+                lines.append(f"  - Prerequisites: {', '.join(path['prerequisites']) if path['prerequisites'] else 'None'}")
+                lines.append(f"  - Missing evidence: {', '.join(path['missing_evidence']) if path['missing_evidence'] else 'None'}")
+                lines.append(f"  - Related findings: {', '.join(path['related_findings']) if path['related_findings'] else 'None'}")
+                lines.append(f"  - Remediation summary: {path['remediation_summary']}")
     else:
-        lines.append("No supported attack paths were inferred.")
+        lines.append("No supported attack paths were generated.")
 
     lines.extend([
         "",
@@ -2430,10 +3071,13 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     autonomous_highest = min((finding["severity"] for finding in autonomous_findings), key=lambda sev: SEVERITY_ORDER.get(sev, 9)) if autonomous_findings else "-"
     lines.extend([
         "",
-        "## Agentic AI Security",
-        f"- Prompt Injection Findings: {sum(1 for finding in agentic_findings if finding.get('rule') in {'prompt_override', 'role_manipulation', 'hidden_instruction'})}",
-        f"- Tool Abuse Findings: {sum(1 for finding in agentic_findings if finding.get('rule') == 'tool_abuse_instruction')}",
-        f"- Prompt Extraction Findings: {sum(1 for finding in agentic_findings if finding.get('rule') == 'prompt_extraction')}",
+        "## AI Agent Security Review",
+        f"- Agent surfaces detected: {', '.join(sorted({finding.get('rule') for finding in agentic_findings if finding.get('rule')})) or 'None'}",
+        f"- Prompt/retrieval risks: {sum(1 for finding in findings if finding.get('category') in {'prompt_injection', 'retrieval_poisoning'})}",
+        f"- Tool/MCP risks: {sum(1 for finding in findings if finding.get('category') == 'mcp_tool_abuse' or finding.get('rule') in {'tool_to_shell_path', 'tool_to_filesystem_path', 'tool_to_network_path'})}",
+        f"- Memory risks: {len(memory_findings)}",
+        f"- Execution and egress paths: {sum(1 for finding in findings if finding.get('rule') in {'tool_to_shell_path', 'tool_to_filesystem_path', 'tool_to_network_path', 'shell_true', 'network_client_usage'})}",
+        f"- Confirmed agent attack paths: {', '.join(sorted({finding.get('attack_path') for finding in agentic_findings if finding.get('attack_path')})) or 'None'}",
         f"- Retrieval Poisoning Findings: {len(retrieval_findings)}",
         "",
         "### Memory / Persistent Context Risks",
@@ -2707,8 +3351,22 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
         scope: sum(1 for finding in findings if scope in set(finding.get("scope_tags", [])))
         for scope in ["production", "test", "dependency", "generated", "documentation"]
     }
-    trust_boundary_graph = build_trust_boundary_graph(findings, trust_paths(findings))
+    trust_paths_items = trust_paths(findings)
+    trust_boundary_graph = build_trust_boundary_graph(findings, trust_paths_items)
     auth_review = auth_review_summary(findings)
+    tenant_review = tenant_isolation_review_summary(findings)
+    attack_path_info = attack_paths(findings, trust_paths_items=trust_paths_items, trust_boundary_graph=trust_boundary_graph, auth_review=auth_review, tenant_review=tenant_review)
+    repository_maps = repository_understanding_summary(findings)
+    agent_findings = [finding for finding in findings if finding.get("category") == "agentic_security"]
+    agent_attack_paths = sorted({finding.get("attack_path") for finding in agent_findings if finding.get("attack_path")})
+    confirmed_agent_findings = [finding for finding in agent_findings if finding.get("finding_class") == "confirmed_vulnerability"]
+    infrastructure_findings = [finding for finding in findings if finding.get("category") in {"container_security", "ci_cd_security", "infrastructure_as_code"}]
+    confirmed_infrastructure_findings = [
+        finding
+        for finding in infrastructure_findings
+        if finding.get("finding_class") == "confirmed_vulnerability" or finding.get("confidence_score", 0) >= 80
+    ]
+    infrastructure_files_detected = len({finding.get("file") for finding in infrastructure_findings if finding.get("file")})
     return {
         "schema_version": 3,
         "repo": {
@@ -2739,6 +3397,16 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
                 "required_reviews": readiness["required_reviews"],
             },
             "scope_counts": scope_counts,
+            "tenant_controls_detected": tenant_review["tenant_controls_detected"],
+            "tenant_review_count": tenant_review["tenant_review_count"],
+            "confirmed_cross_tenant_findings": tenant_review["confirmed_cross_tenant_findings"],
+            "agent_surfaces_detected": sorted({finding.get("rule") for finding in agent_findings if finding.get("rule")}),
+            "agent_review_count": len(agent_findings),
+            "confirmed_agent_findings": len(confirmed_agent_findings),
+            "agent_attack_paths": agent_attack_paths,
+            "infrastructure_files_detected": infrastructure_files_detected,
+            "infrastructure_review_count": len(infrastructure_findings),
+            "confirmed_infrastructure_findings": len(confirmed_infrastructure_findings),
         },
         "suppressions": {
             "active": active_suppressions,
@@ -2756,10 +3424,20 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
         "trust_boundary": boundary_summary(findings),
         "top_risks": top_risks(findings, repo_config=repo_config),
         "attack_surface": surface,
-        "trust_paths": trust_paths(findings),
-        "attack_chains": attack_chains(trust_paths(findings)),
+        "trust_paths": trust_paths_items,
+        "attack_chains": attack_chains(trust_paths_items),
+        "attack_paths": attack_path_info["paths"],
+        "attack_path_summary": attack_path_info["summary"],
         "trust_boundary_graph": trust_boundary_graph,
         "auth_review": auth_review,
+        "multi_tenant_isolation_review": tenant_review,
+        "repository_understanding": repository_maps["repository_understanding"],
+        "authentication_map": repository_maps["authentication_map"],
+        "authorisation_map": repository_maps["authorisation_map"],
+        "data_flow_map": repository_maps["data_flow_map"],
+        "trust_boundary_map": repository_maps["trust_boundary_map"],
+        "agent_map": repository_maps["agent_map"],
+        "infrastructure_map": repository_maps["infrastructure_map"],
         "framework_specific_findings": [
             {
                 "id": finding["id"],
@@ -2803,6 +3481,7 @@ def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: boo
 
     rule_map = {}
     for finding in findings:
+        attack_path_ids = [f"AP-{finding['id']}"] if _attack_path_status(finding) and _attack_path_category(finding) else []
         rule_id = finding.get("rule_id") or finding.get("rule")
         if not rule_id or rule_id in rule_map:
             continue
@@ -2813,23 +3492,50 @@ def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: boo
             "shortDescription": {"text": finding.get("rule", rule_id)},
             "fullDescription": {"text": finding.get("impact") or finding.get("recommendation") or "TrustBoundary finding."},
             "help": {"text": help_text},
-            "properties": {
-                "category": finding.get("category"),
-                "severity": finding.get("severity"),
-                "confidence_level": finding.get("confidence_level"),
-                "scope": finding.get("scope"),
-                "trust_boundary": finding.get("trust_boundary"),
-                "production_blocker": finding.get("production_blocker"),
-                "status": finding.get("status"),
-                "exposure": finding.get("exposure"),
-                "finding_class": finding.get("finding_class"),
-                "evidence_level": finding.get("evidence_level"),
-            },
-        }
+                "properties": {
+                    "category": finding.get("category"),
+                    "severity": finding.get("severity"),
+                    "confidence_level": finding.get("confidence_level"),
+                    "scope": finding.get("scope"),
+                    "trust_boundary": finding.get("trust_boundary"),
+                    "production_blocker": finding.get("production_blocker"),
+                    "status": finding.get("status"),
+                    "exposure": finding.get("exposure"),
+                    "finding_class": finding.get("finding_class"),
+                    "evidence_level": finding.get("evidence_level") or "capability",
+                    "confidence_score": finding.get("confidence_score"),
+                    "confidence_band": finding.get("confidence_band"),
+                    "confidence_reason": finding.get("confidence_reason"),
+                    "evidence_components": finding.get("evidence_components"),
+                    "missing_evidence": finding.get("missing_evidence"),
+                    "agent_surface": finding.get("agent_surface"),
+                    "prompt_evidence": finding.get("prompt_evidence"),
+                    "retrieval_evidence": finding.get("retrieval_evidence"),
+                    "memory_evidence": finding.get("memory_evidence"),
+                    "tool_evidence": finding.get("tool_evidence"),
+                    "mcp_evidence": finding.get("mcp_evidence"),
+                    "execution_evidence": finding.get("execution_evidence"),
+                    "filesystem_evidence": finding.get("filesystem_evidence"),
+                    "network_egress_evidence": finding.get("network_egress_evidence"),
+                    "sensitive_data_evidence": finding.get("sensitive_data_evidence"),
+                    "tenant_data_evidence": finding.get("tenant_data_evidence"),
+                    "controls_observed": finding.get("controls_observed"),
+                    "controls_missing": finding.get("controls_missing"),
+                    "attack_path": finding.get("attack_path"),
+                    "attack_path_ids": attack_path_ids,
+                    "proof_status": finding.get("proof_status"),
+                    "boundary_crossing": finding.get("boundary_crossing"),
+                    "infrastructure_surface": finding.get("infrastructure_surface"),
+                    "config_file": finding.get("config_file"),
+                    "config_key": finding.get("config_key"),
+                    "observed_evidence": finding.get("observed_evidence"),
+                },
+            }
 
     rules = sorted(rule_map.values(), key=_rule_sort_key)
     results = []
     for finding in findings:
+        attack_path_ids = [f"AP-{finding['id']}"] if _attack_path_status(finding) and _attack_path_category(finding) else []
         rule_id = finding.get("rule_id") or finding.get("rule")
         if not rule_id:
             continue
@@ -2847,7 +3553,33 @@ def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: boo
                 "status": finding.get("status"),
                 "exposure": finding.get("exposure"),
                 "finding_class": finding.get("finding_class"),
-                "evidence_level": finding.get("evidence_level"),
+                "evidence_level": finding.get("evidence_level") or "capability",
+                "confidence_score": finding.get("confidence_score"),
+                "confidence_band": finding.get("confidence_band"),
+                "confidence_reason": finding.get("confidence_reason"),
+                "evidence_components": finding.get("evidence_components"),
+                "missing_evidence": finding.get("missing_evidence"),
+                "agent_surface": finding.get("agent_surface"),
+                "prompt_evidence": finding.get("prompt_evidence"),
+                "retrieval_evidence": finding.get("retrieval_evidence"),
+                "memory_evidence": finding.get("memory_evidence"),
+                "tool_evidence": finding.get("tool_evidence"),
+                "mcp_evidence": finding.get("mcp_evidence"),
+                "execution_evidence": finding.get("execution_evidence"),
+                "filesystem_evidence": finding.get("filesystem_evidence"),
+                "network_egress_evidence": finding.get("network_egress_evidence"),
+                "sensitive_data_evidence": finding.get("sensitive_data_evidence"),
+                "tenant_data_evidence": finding.get("tenant_data_evidence"),
+                "controls_observed": finding.get("controls_observed"),
+                "controls_missing": finding.get("controls_missing"),
+                "attack_path": finding.get("attack_path"),
+                "attack_path_ids": attack_path_ids,
+                "proof_status": finding.get("proof_status"),
+                "boundary_crossing": finding.get("boundary_crossing"),
+                "infrastructure_surface": finding.get("infrastructure_surface"),
+                "config_file": finding.get("config_file"),
+                "config_key": finding.get("config_key"),
+                "observed_evidence": finding.get("observed_evidence"),
             },
         }
         if explain and finding.get("exposure"):
@@ -2958,11 +3690,13 @@ def main(argv=None):
         audit_warnings = list(audit_warnings or []) + risk_acceptance_warnings(getattr(repo_config, "risk_acceptance", ()))
         emit("Scoring findings...", args.quiet)
         scored = score_findings(raw_findings, args.include_dependencies, args.include_tests, repo_config=repo_config)
+        infrastructure_findings = [finding for finding in scored["findings"] if finding.get("category") in {"container_security", "ci_cd_security", "infrastructure_as_code"}]
         scope_summary = {
             "files_scanned": files_checked,
             "files_skipped": max(0, files_checked - len(raw_findings)),
             "excluded_dir_count": len(excluded_directories),
             "excluded_directories": excluded_directories,
+            "infrastructure_files_detected": len({finding.get("file") for finding in infrastructure_findings if finding.get("file")}),
         }
         findings_path = Path.cwd() / "security-audit-findings.json"
         report_path = Path.cwd() / "SECURITY_AUDIT_REPORT.md"

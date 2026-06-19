@@ -10,7 +10,7 @@ Developers and AI-agent users need a quick way to audit unfamiliar code before t
 
 This package provides a read-only, CLI-backed security audit plugin. It scans a target repository with local static checks and produces structured JSON plus a Markdown report for review.
 
-The report includes a production security gate, Top Risks, Trust Boundary Assessment, and aggregated findings summary. The release decision distinguishes `REVIEW_REQUIRED` from `NOT_READY_FOR_PRODUCTION`.
+The report includes a production security gate, Top Risks, Trust Boundary Assessment, aggregated findings summary, and Infrastructure Security Review. The release decision distinguishes `REVIEW_REQUIRED` from `NOT_READY_FOR_PRODUCTION`.
 
 ## What It Checks
 
@@ -19,6 +19,7 @@ The report includes a production security gate, Top Risks, Trust Boundary Assess
 - Dangerous execution patterns
 - Possible exfiltration patterns
 - Risky plugin, skill and MCP configuration patterns
+- Infrastructure and deployment review surfaces, including Dockerfiles, compose files, GitHub Actions workflows, Terraform, Kubernetes manifests, Helm charts, Supabase config, and `.env` template files
 
 ## What It Outputs
 
@@ -99,3 +100,36 @@ This is heuristic static scanning. It is not a full SAST platform, a penetration
 ## Release Readiness
 
 Run `python scripts/validate_plugin.py` and `pytest -q` before release to confirm the bundle and CLI wiring are intact.
+
+### Phase 5 Release Note
+
+Phase 5 adds Multi-Tenant Isolation Analysis.
+
+- The scanner now reports tenant evidence, tenant propagation, query scope, retrieval scope, ownership scope, and missing tenant controls.
+- The trust-boundary graph now includes tenant-context, repository, query, retrieval, prompt, agent-tool, and external-network tenant paths.
+- JSON output includes `tenant_controls_detected`, `tenant_review_count`, and `confirmed_cross_tenant_findings`.
+- Markdown output includes `## Multi-Tenant Isolation Review`.
+- Readiness behavior keeps tenant capability evidence informational, requires review for material tenant-isolation gaps, and blocks production on confirmed cross-tenant exposure.
+
+Validation:
+
+- `python scripts/validate_plugin.py`
+- `pytest -q`
+- `124 passed`
+
+### Phase 7 Release Note
+
+Phase 7 adds Infrastructure Security Analysis.
+
+- The scanner stays local and read-only while reviewing Dockerfiles, compose files, GitHub Actions workflows, Terraform, Kubernetes manifests, Helm charts, Supabase config, and `.env` template files.
+- Infrastructure findings preserve evidence fields such as `infrastructure_surface`, `config_file`, `config_key`, `observed_evidence`, `missing_evidence`, `controls_observed`, `controls_missing`, `boundary_crossing`, `proof_status`, `finding_class`, `evidence_level`, `confidence_score`, `confidence_band`, and `confidence_reason`.
+- The trust-boundary graph now includes infrastructure edges for CI workflows, deployment targets, container host access, external network access, Kubernetes host/runtime access, Supabase tenant data, and Terraform cloud resources.
+- JSON output includes `infrastructure_files_detected`, `infrastructure_review_count`, and `confirmed_infrastructure_findings`.
+- Markdown output now includes `## Infrastructure Security Review`.
+- Readiness remains conservative: observed capability is informational, material infrastructure risks require review, and confirmed secret exposure, privileged host access, or dangerous deployment paths block production.
+
+Validation:
+
+- `python scripts/validate_plugin.py`
+- `pytest -q`
+- `132 passed`
