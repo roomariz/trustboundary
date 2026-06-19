@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 import time
 import sys
-from scanner_utils import is_dependency_path, is_test_path
+from scanner_utils import is_dependency_path, is_test_path, load_ignore_patterns, load_trustboundary_config, path_scope_tags
 
 
 ROOT = Path(__file__).resolve().parent
@@ -169,17 +169,15 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
     for finding in scored["findings"]:
         metadata = CATEGORY_METADATA.get(finding["category"], {})
         path = Path(finding.get("file") or "")
+        scope_tags = tuple(finding.get("scope_tags") or path_scope_tags(path))
         production_blocker = finding["severity"] == "Critical" or (finding["severity"] == "High" and finding["confidence_level"] == BLOCKING_CONFIDENCE)
         if finding["rule"] == "high_entropy_literal":
             production_blocker = False
-        is_doc_path = path.suffix.lower() in {".md", ".txt", ".rst"}
-        if is_doc_path and finding["category"] != "leaked_secrets":
+        if any(tag in {"documentation", "generated"} for tag in scope_tags) and finding["category"] != "leaked_secrets":
             production_blocker = False
-        if is_doc_path and finding["category"] in {"prompt_injection", "framework_security"} and finding["rule"] not in {"real_secret_pattern", "dangerous_code_block"}:
+        if "test" in scope_tags and not include_tests:
             production_blocker = False
-        if is_test_path(path) and not include_tests:
-            production_blocker = False
-        if is_dependency_path(path) and not include_dependencies:
+        if "dependency" in scope_tags and not include_dependencies:
             production_blocker = False
         findings.append({
             **finding,
@@ -192,7 +190,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
     return {"findings": findings, "correlations": scored["correlations"]}
 
 
-def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool = False, include_tests: bool = False, include_env_files: bool = False, colour_enabled: bool = False, use_icons: bool = True):
+def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool = False, include_tests: bool = False, include_env_files: bool = False, colour_enabled: bool = False, use_icons: bool = True, ignore_patterns: tuple[str, ...] = (), config=None):
     all_findings = []
     audit_warnings = []
     total = len(SCANNER_MODULES)
@@ -214,6 +212,8 @@ def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool
         scanner = load_module(module_name)
         emit(f"[{index}/{total}] {labels.get(module_name, f'Scanning {module_name}') }...", quiet)
         started = time.perf_counter()
+        if config and config.enabled_scanners and module_name not in config.enabled_scanners:
+            continue
         try:
             try:
                 module_findings = scanner.walk(
@@ -221,6 +221,7 @@ def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool
                     include_tests=include_tests,
                     include_dependencies=include_dependencies,
                     include_env_files=include_env_files,
+                    ignore_patterns=ignore_patterns,
                     progress_callback=heartbeat,
                 )
             except TypeError:
@@ -255,6 +256,8 @@ def posture_label(counts):
 def release_decision(findings):
     if any(f.get("production_blocker") for f in findings):
         return "NOT_READY_FOR_PRODUCTION"
+    if any(f.get("category") == "scanner_failure" for f in findings):
+        return "REVIEW_REQUIRED"
     if any(f.get("severity") == "Medium" or (f.get("severity") == "High" and f.get("confidence_level") != BLOCKING_CONFIDENCE) for f in findings):
         return "REVIEW_REQUIRED"
     if any(f.get("category") in {"prompt_injection", "mcp_tool_abuse", "data_exfiltration", "framework_security"} for f in findings):
@@ -287,8 +290,10 @@ def boundary_summary(findings):
 
 def attack_surface_summary(findings):
     categories = Counter(f["category"] for f in findings)
+    scopes = Counter(f.get("scope", "production") for f in findings)
     return {
         "findings_by_category": dict(categories),
+        "findings_by_scope": dict(scopes),
         "top_rules": [finding["rule"] for finding in findings[:10]],
         "high_risk_paths": len([finding for finding in findings if finding.get("production_blocker")]),
     }
@@ -298,7 +303,7 @@ def top_risks(findings):
     eligible = [
         finding
         for finding in findings
-        if not (Path(finding.get("file") or "").suffix.lower() in {".md", ".txt", ".rst"} and finding.get("category") not in {"leaked_secrets"})
+        if finding.get("scope", "production") == "production" or finding.get("category") in {"leaked_secrets"}
     ]
     return sorted(
         eligible,
@@ -465,6 +470,13 @@ def render_report(repo_path: Path, scored, scope_summary):
         f"- Categories observed: {', '.join(sorted(attack_surface['findings_by_category'])) if attack_surface['findings_by_category'] else 'None'}",
         f"- High risk paths: {attack_surface['high_risk_paths']}",
         "",
+        "## Scope Breakdown",
+    ])
+    for scope_name in ["production", "test", "dependency", "generated", "documentation"]:
+        lines.append(f"- {scope_name.title()}: {attack_surface['findings_by_scope'].get(scope_name, 0)}")
+
+    lines.extend([
+        "",
         "## Scan Scope",
         f"- Target: `{repo_path}`",
         "- Mode: application source scan",
@@ -559,6 +571,7 @@ def build_json_output(repo_path: Path, scored, scope_summary):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", nargs="?", default=".")
+    parser.add_argument("subcommand", nargs="?", default=None)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--no-colour", action="store_true")
     parser.add_argument("--no-icons", action="store_true")
@@ -568,6 +581,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     target_repo = Path(args.repo).resolve()
+    if args.subcommand and args.repo == "scan":
+        target_repo = Path(args.subcommand).resolve()
     if not target_repo.exists():
         print(f"Target repository does not exist: {target_repo}", file=sys.stderr)
         return 1
@@ -586,6 +601,8 @@ def main(argv=None):
         emit("Mode: application source scan", args.quiet)
         log_line(f"Excluded directories: {len(excluded_directories)}", kind="info", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         log_line("Scanning source files...", kind="info", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
+        repo_config = load_trustboundary_config(target_repo)
+        ignore_patterns = load_ignore_patterns(target_repo)
         raw_findings, audit_warnings, files_checked = scan_repo(
             target_repo,
             args.quiet,
@@ -594,6 +611,8 @@ def main(argv=None):
             args.include_env_files,
             colour_enabled=colour_enabled,
             use_icons=use_icons,
+            ignore_patterns=ignore_patterns + tuple(repo_config.exclusions),
+            config=repo_config,
         )
         emit("Scoring findings...", args.quiet)
         scored = score_findings(raw_findings, args.include_dependencies, args.include_tests)
@@ -610,6 +629,7 @@ def main(argv=None):
         if audit_warnings:
             json_output["audit_warnings"] = audit_warnings
             json_output["summary"]["scanner_failures"] = len(audit_warnings)
+            json_output["summary"]["release_decision"] = "REVIEW_REQUIRED"
         findings_path.write_text(json.dumps(json_output, indent=2), encoding="utf-8")
         report = render_report(target_repo, scored, scope_summary)
         warnings_block = render_audit_warnings(audit_warnings)

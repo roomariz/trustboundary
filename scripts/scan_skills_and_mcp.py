@@ -75,18 +75,18 @@ def scan_config_value(path, findings, label, value):
         for index, item in enumerate(value):
             scan_config_value(path, findings, f"{label}[{index}]", item)
 
-def find_skill_files(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
+def find_skill_files(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None, ignore_patterns=()):
     out = []
-    for _, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback):
+    for _, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback, ignore_patterns=ignore_patterns):
         if is_env_file(path) and not include_env_files:
             continue
         if path.name == "SKILL.md":
             out.append(str(path))
     return out
 
-def find_mcp_configs(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
+def find_mcp_configs(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None, ignore_patterns=()):
     out = []
-    for _, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback):
+    for _, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback, ignore_patterns=ignore_patterns):
         if is_env_file(path) and not include_env_files:
             continue
         fn = path.name
@@ -191,11 +191,11 @@ def scan_mcp_config(path, findings):
     for name, cfg in items:
         scan_config_value(path, findings, str(name), cfg)
 
-def walk(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
+def walk(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None, ignore_patterns=()):
     findings = []
-    for skill_file in find_skill_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, include_env_files=include_env_files, progress_callback=progress_callback):
+    for skill_file in find_skill_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, include_env_files=include_env_files, progress_callback=progress_callback, ignore_patterns=ignore_patterns):
         scan_skill_md(skill_file, findings)
-    for mcp_file in find_mcp_configs(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, include_env_files=include_env_files, progress_callback=progress_callback):
+    for mcp_file in find_mcp_configs(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, include_env_files=include_env_files, progress_callback=progress_callback, ignore_patterns=ignore_patterns):
         scan_mcp_config(mcp_file, findings)
     repo_root = Path(repo_path).resolve()
     for finding in findings:

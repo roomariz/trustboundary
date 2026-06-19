@@ -10,6 +10,9 @@ import itertools
 import json
 import sys
 from collections import defaultdict
+from pathlib import Path
+
+from scanner_utils import path_scope_tags
 
 SEVERITY_BY_RULE = {
     "aws_secret_key_assignment": "Critical",
@@ -118,6 +121,8 @@ def _evidence_snippet(finding):
 def _aggregate_group(group_id, items):
     representative = sorted(items, key=_location_sort_key)[0]
     files = sorted({item.get("file") for item in items if item.get("file")})
+    scopes = sorted({item.get("scope") for item in items if item.get("scope")})
+    scope_tags = sorted({tag for item in items for tag in item.get("scope_tags", [])})
     locations = []
     seen = set()
     for item in sorted(items, key=_location_sort_key):
@@ -139,6 +144,8 @@ def _aggregate_group(group_id, items):
         "confidence_bucket": confidence_bucket(confidence),
         "file": representative.get("file"),
         "line": representative.get("line"),
+        "scope": representative.get("scope"),
+        "scope_tags": scope_tags or scopes,
         "evidence_redacted": representative.get("evidence_redacted"),
         "evidence_snippet": _evidence_snippet(representative),
         "occurrences": len(items),
@@ -179,6 +186,8 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
     scored_rows = []
     counter = itertools.count(1)
     for finding in raw_findings:
+        scope_tags = path_scope_tags(Path(finding.get("file") or ""))
+        scope = scope_tags[0]
         confidence = adjust_confidence(finding)
         severity = SEVERITY_BY_RULE.get(finding["rule"], "Medium")
         row = {
@@ -192,6 +201,8 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "confidence_bucket": confidence_bucket(confidence),
             "file": finding.get("file"),
             "line": finding.get("line"),
+            "scope": scope,
+            "scope_tags": list(scope_tags),
             "evidence_redacted": finding.get("evidence_redacted"),
             "evidence_snippet": _evidence_snippet(finding),
             "status": "open",
@@ -199,7 +210,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         }
         scored_rows.append(row)
         if finding["rule"] in AGGREGATED_RULES or finding["category"] in AGGREGATED_CATEGORIES:
-            grouped[(finding["category"], finding["rule"])].append(row)
+            grouped[(finding["category"], finding["rule"], scope)].append(row)
 
     aggregated = []
     emitted = set()
@@ -208,11 +219,20 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         emitted.add(key)
 
     for row in scored_rows:
-        key = (row["category"], row["rule"])
+        key = (row["category"], row["rule"], row.get("scope"))
         if key not in emitted:
             aggregated.append(row)
 
-    aggregated.sort(key=lambda item: (item["severity"], -int(item["confidence"]), item.get("file") or "", item.get("line") or 0))
+    sort_key = lambda item: (
+        {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}.get(item["severity"], 9),
+        -int(item["confidence"]),
+        item.get("scope") or "",
+        item.get("file") or "",
+        item.get("line") or 0,
+        item.get("rule") or "",
+    )
+    aggregated.sort(key=sort_key)
+    scored_rows.sort(key=sort_key)
     return {"findings": aggregated, "correlations": correlate(aggregated), "raw_findings": scored_rows}
 
 

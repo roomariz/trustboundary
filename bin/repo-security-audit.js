@@ -16,6 +16,9 @@ function findPython() {
 }
 
 function main() {
+  const argv = process.argv.slice(2);
+  const maybeSubcommand = argv[0];
+  const scanArgs = maybeSubcommand === "scan" ? argv.slice(1) : argv;
   const python = findPython();
   if (!python) {
     console.error("repo-security-audit requires Python 3, but no Python executable was found on PATH.");
@@ -28,7 +31,7 @@ function main() {
     process.exit(1);
   }
 
-  const result = spawnSync(python, [scriptPath, ...process.argv.slice(2)], {
+  const result = spawnSync(python, [scriptPath, ...scanArgs], {
     stdio: "inherit",
   });
 
