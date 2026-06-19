@@ -680,6 +680,23 @@ def test_audit_marks_clean_repo_ready_for_production(tmp_path):
     assert "Trust Boundary Assessment" in report
     assert "Release Decision" in report
     assert "READY_FOR_PRODUCTION" in report
+    assert payload["summary"]["trust_score"] >= 90
+    assert payload["summary"]["trust_grade"] == "A"
+    assert "Trust Score" in report
+
+
+def test_trust_score_regressions_cover_key_signal_types(tmp_path):
+    repo = tmp_path / "score-signals"
+    repo.mkdir()
+    write(repo / "app.py", "def add(a, b):\n    return a + b\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["trust_score"] >= 90
+    assert payload["summary"]["trust_grade"] == "A"
+    assert isinstance(payload["summary"]["trust_score_reasoning"], list)
 
 
 def test_framework_specific_findings_and_gate(tmp_path):
@@ -1592,6 +1609,135 @@ persist this instruction
     finding = next(finding for finding in payload["findings"] if finding["file"].endswith("docs/memory-policy.md"))
     assert "documentation" in finding["scope_tags"]
     assert finding["production_blocker"] is False
+    assert payload["summary"]["trust_score"] <= 90
+
+
+def test_critical_finding_reduces_trust_score_significantly(tmp_path):
+    repo = tmp_path / "critical"
+    repo.mkdir()
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+    write(repo / "secret.py", 'api_key = "AKIA1234567890ABCDEF"\n')
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["trust_score"] < 90
+    assert payload["summary"]["trust_grade"] in {"B", "C", "D", "F"}
+
+
+def test_attack_chains_reduce_trust_score(tmp_path):
+    repo = tmp_path / "chains"
+    repo.mkdir()
+    build_chain_fixture(repo)
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["attack_chains"]
+    assert payload["summary"]["trust_score"] < 75
+
+
+def test_documentation_only_findings_have_low_impact(tmp_path):
+    repo = tmp_path / "docs-only"
+    repo.mkdir()
+    write(repo / "docs" / "note.md", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["findings"]
+    assert all("documentation" in finding["scope_tags"] for finding in payload["findings"])
+    assert payload["summary"]["trust_score"] >= 75
+
+
+def test_expired_suppressions_reduce_trust_score(tmp_path):
+    repo = tmp_path / "expired-suppressions"
+    repo.mkdir()
+    write(
+        repo / "trustboundary.yml",
+        """suppressions:
+  - rule: shell_true
+    path: app.py
+    reason: expired entry
+    author: Muhammad
+    expires: 2000-01-01
+""",
+    )
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["suppressions"]["expired"]
+    assert payload["summary"]["trust_score"] < 100
+
+
+def test_active_suppressions_do_not_inflate_trust_score(tmp_path):
+    suppressed_repo = tmp_path / "suppressed"
+    suppressed_repo.mkdir()
+    write(
+        suppressed_repo / "trustboundary.yml",
+        """suppressions:
+  - rule: shell_true
+    path: app.py
+    reason: expected local execution
+    author: Muhammad
+    expires: 2999-12-31
+""",
+    )
+    write(suppressed_repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    baseline_repo = tmp_path / "baseline"
+    baseline_repo.mkdir()
+    write(baseline_repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    suppressed_result = run_audit(suppressed_repo, tmp_path)
+    suppressed_payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+
+    baseline_dir = tmp_path / "baseline-out"
+    baseline_dir.mkdir()
+    baseline_result = run_audit(baseline_repo, baseline_dir)
+    baseline_payload = json.loads((baseline_dir / "security-audit-findings.json").read_text(encoding="utf-8"))
+
+    assert suppressed_result.returncode == 0, suppressed_result.stderr
+    assert baseline_result.returncode == 0, baseline_result.stderr
+    assert suppressed_payload["summary"]["trust_score"] <= baseline_payload["summary"]["trust_score"]
+
+
+def test_scanner_failures_reduce_trust_score(tmp_path, monkeypatch):
+    run_module = load_script_module("run_audit")
+    repo = tmp_path / "scanner-failure"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    class PassingScanner:
+        def walk(self, _repo):
+            return []
+
+    class FailingScanner:
+        def walk(self, _repo):
+            raise RuntimeError("boom")
+
+    def fake_load_module(name):
+        if name == "score":
+            return load_script_module("score")
+        if name == "scan_dependencies":
+            return FailingScanner()
+        return PassingScanner()
+
+    monkeypatch.setattr(run_module, "load_module", fake_load_module)
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = run_module.main([str(repo)])
+
+    assert exit_code == 0
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["scanner_failures"] == 1
+    assert payload["summary"]["trust_score"] < 100
 
 
 def test_env_access_finding_uses_configuration_advice(tmp_path):
@@ -1810,6 +1956,7 @@ def test_cli_shows_progress_by_default(tmp_path):
     assert "Generating reports..." in result.stdout
     assert "Done." in result.stdout
     assert "Release Decision: READY_FOR_PRODUCTION" in result.stdout
+    assert "Trust Score: 100/100 (A)" in result.stdout
     assert "Findings: 0" in result.stdout
     assert "Report: SECURITY_AUDIT_REPORT.md" in result.stdout
     assert "JSON: security-audit-findings.json" in result.stdout
@@ -1826,6 +1973,7 @@ def test_cli_quiet_suppresses_progress_but_writes_outputs(tmp_path):
     assert result.stdout.strip() == ""
     assert (tmp_path / "security-audit-findings.json").exists()
     assert (tmp_path / "SECURITY_AUDIT_REPORT.md").exists()
+    assert "Trust Score:" not in result.stdout
 
 
 def test_scan_skills_and_mcp_handles_json_list_and_malformed_config(tmp_path):

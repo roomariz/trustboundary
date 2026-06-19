@@ -476,6 +476,130 @@ def attack_surface_summary(findings):
     }
 
 
+def trust_grade(score):
+    if score >= 90:
+        return "A"
+    if score >= 75:
+        return "B"
+    if score >= 60:
+        return "C"
+    if score >= 40:
+        return "D"
+    return "F"
+
+
+def _trust_score_deductions(findings):
+    deductions = []
+    severity_weights = {"Critical": 24, "High": 14, "Medium": 8, "Low": 3, "Info": 1}
+    confidence_weights = {"HIGH": 6, "MEDIUM": 3, "LOW": 1}
+    doc_weight = {"Critical": 14, "High": 7, "Medium": 3, "Low": 1, "Info": 0}
+    for finding in findings:
+        severity = finding.get("severity", "Medium")
+        confidence = finding.get("confidence_level", "MEDIUM")
+        base = severity_weights.get(severity, 8) + confidence_weights.get(confidence, 3)
+        category = finding.get("category")
+        if finding.get("production_blocker"):
+            base += 6
+        if category == "agentic_security":
+            base += 6
+        if category == "retrieval_poisoning":
+            base += 5
+        if category == "mcp_tool_abuse":
+            base += 4
+        if category == "leaked_secrets":
+            base += 8
+        if is_documentation_finding(finding):
+            base = doc_weight.get(severity, 2) + (1 if confidence == "HIGH" else 0)
+        deductions.append({
+            "finding": finding,
+            "points": base,
+        })
+    return deductions
+
+
+def calculate_trust_score(findings, trust_paths_items, attack_chains_items, active_suppressions=None, expired_suppressions=None, audit_warnings=None, unsuppressed_findings=None):
+    active_suppressions = list(active_suppressions or [])
+    expired_suppressions = list(expired_suppressions or [])
+    audit_warnings = list(audit_warnings or [])
+    unsuppressed_findings = list(unsuppressed_findings or findings)
+
+    suppressed = list(findings)
+    active_suppression_count = len(active_suppressions)
+    expired_suppression_count = len(expired_suppressions)
+    blocked_findings = sum(1 for finding in suppressed if finding.get("production_blocker"))
+    doc_findings = [finding for finding in suppressed if is_documentation_finding(finding)]
+    prod_findings = [finding for finding in suppressed if not is_documentation_finding(finding) and (finding.get("scope") == "production" or "production" in set(finding.get("scope_tags", [])))]
+    agentic_findings = [finding for finding in suppressed if finding.get("category") == "agentic_security"]
+    trust_path_count = len(trust_paths_items or [])
+    attack_chain_count = len(attack_chains_items or [])
+    baseline_trust_path_count = len(trust_paths(unsuppressed_findings))
+    baseline_attack_chain_count = len(attack_chains(trust_paths(unsuppressed_findings)))
+
+    deductions = []
+    total = 0
+
+    def add(label, points, evidence):
+        nonlocal total
+        if points <= 0:
+            return
+        total += points
+        deductions.append({"driver": label, "points": points, "evidence": evidence})
+
+    for entry in _trust_score_deductions(suppressed):
+        finding = entry["finding"]
+        add(
+            f"{finding.get('severity', 'Medium')} {finding.get('confidence_level', 'MEDIUM')} finding",
+            entry["points"],
+            finding.get("id"),
+        )
+
+    add("production-scope findings", min(12, len(prod_findings) * 2), len(prod_findings))
+    add("documentation findings", min(6, len(doc_findings)), len(doc_findings))
+    add("production blockers", min(18, blocked_findings * 6), blocked_findings)
+    add("trust paths", min(24, trust_path_count * 4), trust_path_count)
+    add("attack chains", min(28, attack_chain_count * 6), attack_chain_count)
+    add("expired suppressions", min(12, expired_suppression_count * 4), expired_suppression_count)
+    add("scanner failures", min(18, len(audit_warnings) * 6), len(audit_warnings))
+    add("agentic security findings", min(16, len(agentic_findings) * 3), len(agentic_findings))
+
+    raw_score = max(0, 100 - total)
+    baseline_deductions = 0
+    for entry in _trust_score_deductions(unsuppressed_findings):
+        baseline_deductions += entry["points"]
+    baseline_deductions += min(12, sum(1 for finding in unsuppressed_findings if not is_documentation_finding(finding) and (finding.get("scope") == "production" or "production" in set(finding.get("scope_tags", [])))) * 2)
+    baseline_deductions += min(6, sum(1 for finding in unsuppressed_findings if is_documentation_finding(finding)))
+    baseline_deductions += min(18, sum(1 for finding in unsuppressed_findings if finding.get("production_blocker")) * 6)
+    baseline_deductions += min(24, baseline_trust_path_count * 4)
+    baseline_deductions += min(28, baseline_attack_chain_count * 6)
+    baseline_deductions += min(12, expired_suppression_count * 4)
+    baseline_deductions += min(18, len(audit_warnings) * 6)
+    baseline_deductions += min(16, len([finding for finding in unsuppressed_findings if finding.get("category") == "agentic_security"]) * 3)
+    baseline_score = max(0, 100 - baseline_deductions)
+
+    final_score = min(raw_score, baseline_score)
+    final_score = max(0, min(100, final_score))
+
+    reasoning = [
+        f"Start at 100 and deduct for {len(suppressed)} finding(s), {trust_path_count} trust path(s), and {attack_chain_count} attack chain(s).",
+        f"Production-scope findings: {len(prod_findings)}.",
+        f"Documentation findings: {len(doc_findings)}.",
+        f"Production blockers: {blocked_findings}.",
+        f"Expired suppressions: {expired_suppression_count}.",
+        f"Scanner failures: {len(audit_warnings)}.",
+    ]
+    if active_suppression_count:
+        reasoning.append("Active suppressions may reduce the visible findings list, but the score is capped at the unsuppressed baseline.")
+
+    top_drivers = sorted(deductions, key=lambda item: item["points"], reverse=True)[:5]
+    return {
+        "trust_score": final_score,
+        "trust_grade": trust_grade(final_score),
+        "trust_score_reasoning": reasoning,
+        "top_drivers": top_drivers,
+        "baseline_score": baseline_score,
+    }
+
+
 def top_risks(findings, repo_config=None):
     eligible = [
         finding
@@ -1212,8 +1336,8 @@ def format_location(finding):
 
 def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None):
     findings = sorted(scored["findings"], key=severity_sort_key)
-    suppressions = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
-    findings, active_suppressions, expired_suppressions, ignored_findings = suppressions
+    unsuppressed_findings = list(findings)
+    findings, active_suppressions, expired_suppressions, ignored_findings = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
     counts = risk_counts(findings)
     decision = release_decision(findings, audit_warnings=audit_warnings)
     trust_profile = boundary_summary(findings)
@@ -1224,6 +1348,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     recommended = recommended_fixes(findings)
     framework_items = framework_findings(findings)
     risks = top_risks(findings, repo_config=repo_config)
+    trust_score_info = calculate_trust_score(findings, paths, chains, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, unsuppressed_findings=unsuppressed_findings)
 
     blockers_exist = bool(required)
     blocker_label = "Production Blockers" if decision == "NOT_READY_FOR_PRODUCTION" else "Blocking Review"
@@ -1254,8 +1379,21 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         f"- {decision}",
         f"- Reason: {required_reason}",
         "",
-        "## Top Risks",
+        "## Trust Score",
+        f"- Score: {trust_score_info['trust_score']}/100",
+        f"- Grade: {trust_score_info['trust_grade']}",
+        "- Top score drivers:",
     ]
+    if trust_score_info["top_drivers"]:
+        for driver in trust_score_info["top_drivers"]:
+            lines.append(f"  - {driver['driver']}: -{driver['points']} ({driver['evidence']})")
+    else:
+        lines.append("  - None")
+
+    lines.extend([
+        "",
+        "## Top Risks",
+    ])
     agentic_findings = [finding for finding in findings if finding.get("category") == "agentic_security"]
     autonomous_findings = [finding for finding in findings if finding.get("category") == "agentic_security" and finding.get("rule") in {"auto_run", "auto_execute", "unattended_execution", "spawn_agent", "create_sub_agent", "recursive_task", "self_improve", "self_modify", "delegate_until_done", "loop_until_success", "use_tools_automatically", "invoke_any_tool", "execute_tool_without_approval", "auto_call_tools", "indefinite_tool_retry", "auto_deploy", "push_to_main", "delete_production", "run_migration_automatically", "apply_terraform_automatically", "kubectl_apply", "docker_push", "npm_publish", "missing_human_gate"}]
     retrieval_findings = [finding for finding in findings if finding.get("category") == "retrieval_poisoning"]
@@ -1461,10 +1599,12 @@ def render_audit_warnings(warnings):
 
 def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None):
     findings = list(scored["findings"])
+    unsuppressed_findings = list(findings)
     findings, active_suppressions, expired_suppressions, ignored_findings = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
     counts = risk_counts(findings)
     decision = release_decision(findings, audit_warnings=audit_warnings)
     surface = attack_surface_summary(findings)
+    trust_score_info = calculate_trust_score(findings, trust_paths(findings), attack_chains(trust_paths(findings)), active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, unsuppressed_findings=unsuppressed_findings)
     scope_counts = {
         scope: sum(1 for finding in findings if scope in set(finding.get("scope_tags", [])))
         for scope in ["production", "test", "dependency", "generated", "documentation"]
@@ -1483,6 +1623,9 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
             "release_decision": decision,
             "production_blockers": sum(1 for finding in findings if finding.get("production_blocker")),
             "scanner_failures": len(audit_warnings or []),
+            "trust_score": trust_score_info["trust_score"],
+            "trust_grade": trust_score_info["trust_grade"],
+            "trust_score_reasoning": trust_score_info["trust_score_reasoning"],
             "scope_counts": scope_counts,
         },
         "suppressions": {
@@ -1587,6 +1730,7 @@ def main(argv=None):
         decision = release_decision(scored["findings"], audit_warnings=audit_warnings)
         decision_kind = "success" if decision in {"READY_FOR_PRODUCTION", "READY_WITH_REVIEW"} else "warning" if decision == "REVIEW_REQUIRED" else "error"
         log_line(f"Release Decision: {decision}", kind=decision_kind, quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
+        log_line(f"Trust Score: {json_output['summary']['trust_score']}/100 ({json_output['summary']['trust_grade']})", kind="info", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         emit(f"Findings: {len(scored['findings'])}", args.quiet)
         if audit_warnings:
             emit(f"Audit warnings: {len(audit_warnings)}", args.quiet)
