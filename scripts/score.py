@@ -106,6 +106,15 @@ SEVERITY_BY_RULE = {
     "retrieval_policy_violation": "High",
     "untrusted_retrieval_ingestion": "High",
     "persistent_poisoned_context": "Medium",
+    "npm_audit_vulnerability": "High",
+    "pip_audit_vulnerability": "High",
+    "semgrep_finding": "Medium",
+    "gitleaks_secret": "Critical",
+    "trivy_vulnerability": "High",
+    "trivy_secret": "Critical",
+    "trivy_container_vulnerability": "High",
+    "trivy_iac_issue": "Medium",
+    "codeql_finding": "High",
 }
 
 LOW_CONTEXT_TAGS = ["test", "fixture", "example", "sample", "mock"]

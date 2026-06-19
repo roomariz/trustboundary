@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import shutil
+import subprocess
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -100,6 +102,36 @@ CATEGORY_METADATA = {
         "recommendation": "Add the missing dependency, allowlist, or tenant guard before exposing the path to production. Prefer framework-native auth and validation hooks.",
         "trust_boundary": ["framework"],
     },
+    "dependency_vulnerability": {
+        "impact": "A dependency or package ecosystem issue may expose the repository to known exploits or malicious code paths.",
+        "recommendation": "Upgrade, pin, or remove the affected dependency and verify the lockfile before release.",
+        "trust_boundary": ["dependency"],
+    },
+    "static_code_security": {
+        "impact": "Static analysis identified code patterns that may enable security issues.",
+        "recommendation": "Review the flagged code path and remediate the insecure pattern before release.",
+        "trust_boundary": ["execution", "filesystem", "network"],
+    },
+    "secret_leakage": {
+        "impact": "Secret material appears to be committed or exposed in the repository.",
+        "recommendation": "Remove the secret, rotate the credential, and move it to a secrets manager.",
+        "trust_boundary": ["credentials", "filesystem"],
+    },
+    "container_security": {
+        "impact": "Container image or container configuration may include known security issues.",
+        "recommendation": "Update the image base, dependencies, or runtime configuration before shipping.",
+        "trust_boundary": ["container", "execution"],
+    },
+    "infrastructure_as_code": {
+        "impact": "Infrastructure-as-code configuration may expose cloud or deployment resources to risk.",
+        "recommendation": "Tighten the infrastructure policy, module versions, and resource access controls.",
+        "trust_boundary": ["configuration", "deployment"],
+    },
+    "ci_cd_security": {
+        "impact": "CI/CD configuration may allow unsafe pipeline execution or secret exposure.",
+        "recommendation": "Lock down workflow permissions, secret handling, and pipeline triggers before release.",
+        "trust_boundary": ["deployment", "execution", "credentials"],
+    },
 }
 
 RULE_RECOMMENDATIONS = {
@@ -173,6 +205,157 @@ def load_module(name: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def tool_available(command: str) -> bool:
+    return shutil.which(command) is not None
+
+
+def run_optional_tool(command, cwd: Path):
+    try:
+        return subprocess.run(command, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    except FileNotFoundError:
+        return None
+
+
+def _external_finding(tool: str, category: str, rule: str, severity: str, confidence: str, file=None, line=None, evidence=None, impact=None, recommendation=None, trust_boundary=None, production_blocker=False, extra=None):
+    finding = {
+        "tool": tool,
+        "category": category,
+        "rule": rule,
+        "rule_id": rule,
+        "file": file,
+        "line": line,
+        "evidence": evidence,
+        "evidence_redacted": evidence,
+        "impact": impact,
+        "recommendation": recommendation,
+        "trust_boundary": trust_boundary or CATEGORY_METADATA.get(category, {}).get("trust_boundary", ["unknown"]),
+        "production_blocker": production_blocker,
+        "base_confidence": {"HIGH": 85, "MEDIUM": 65, "LOW": 35}.get(confidence, 50),
+        "external_source": tool,
+        "external_severity": severity,
+    }
+    if extra:
+        finding.update(extra)
+    return finding
+
+
+def _load_json(text: str):
+    text = text.strip()
+    if not text:
+        return None
+    return json.loads(text)
+
+
+def parse_npm_audit(output: str, repo_path: Path):
+    data = _load_json(output)
+    if not data:
+        return []
+    findings = []
+    advisories = data.get("vulnerabilities") or {}
+    for package_name, vuln in advisories.items():
+        sev = (vuln.get("severity") or "high").lower()
+        severity = "Critical" if sev == "critical" else "High" if sev == "high" else "Medium" if sev == "moderate" else "Low"
+        recommendations = vuln.get("fixAvailable")
+        evidence = json.dumps({"package": package_name, "severity": vuln.get("severity"), "via": vuln.get("via")}, ensure_ascii=False)
+        findings.append(_external_finding("npm audit", "dependency_vulnerability", "npm_audit_vulnerability", severity, "HIGH" if severity in {"Critical", "High"} else "MEDIUM", file=str(repo_path / "package.json"), evidence=evidence, impact="npm audit reported a vulnerable dependency.", recommendation=f"Update {package_name}." if package_name else "Update the vulnerable dependency.", production_blocker=severity in {"Critical", "High"} and (vuln.get("isDirect") or vuln.get("via")), extra={"package": package_name, "fix_available": recommendations}))
+    return findings
+
+
+def parse_pip_audit(output: str, repo_path: Path):
+    data = _load_json(output)
+    if not data:
+        return []
+    findings = []
+    for dep in data.get("dependencies", []):
+        name = dep.get("name")
+        for vuln in dep.get("vulns", []):
+            findings.append(_external_finding("pip-audit", "dependency_vulnerability", "pip_audit_vulnerability", "High", "HIGH", file=str(repo_path / "requirements.txt"), evidence=json.dumps(vuln, ensure_ascii=False), impact="pip-audit reported a vulnerable Python dependency.", recommendation=f"Upgrade {name} to a secure version.", production_blocker=True, extra={"package": name, "vulnerability_id": vuln.get("id"), "aliases": vuln.get("aliases", [])}))
+    return findings
+
+
+def parse_semgrep(output: str):
+    data = _load_json(output)
+    if not data:
+        return []
+    findings = []
+    for result in data.get("results", []):
+        path = result.get("path")
+        extra = {"semgrep_id": result.get("check_id"), "metadata": result.get("extra", {})}
+        findings.append(_external_finding("semgrep", "static_code_security", "semgrep_finding", "High" if result.get("extra", {}).get("severity") in {"ERROR", "WARNING"} else "Medium", "HIGH" if result.get("extra", {}).get("confidence", "HIGH").upper() == "HIGH" else "MEDIUM", file=path, line=result.get("start", {}).get("line"), evidence=result.get("extra", {}).get("message"), impact="Semgrep identified a security-sensitive code pattern.", recommendation=result.get("extra", {}).get("fix", "Review and remediate the flagged code path."), extra=extra))
+    return findings
+
+
+def parse_gitleaks(output: str):
+    data = _load_json(output)
+    if not data:
+        return []
+    findings = []
+    for item in data if isinstance(data, list) else data.get("leaks", []):
+        findings.append(_external_finding("gitleaks", "secret_leakage", "gitleaks_secret", "Critical", "HIGH", file=item.get("File"), line=item.get("StartLine"), evidence=item.get("Match"), impact="Gitleaks identified a committed secret.", recommendation="Remove the secret and rotate the credential.", production_blocker=True, extra={"rule": item.get("RuleID"), "secret": item.get("Secret")}))
+    return findings
+
+
+def parse_trivy(output: str):
+    data = _load_json(output)
+    if not data:
+        return []
+    findings = []
+    for result in data.get("Results", []):
+        target = result.get("Target", "")
+        vuln_type = (result.get("Type") or "").lower()
+        category = "container_security" if "container" in vuln_type or target.startswith("docker://") else "dependency_vulnerability" if "package" in vuln_type or "library" in vuln_type else "infrastructure_as_code" if vuln_type in {"terraform", "cloudformation", "kubernetes"} else "secret_leakage" if vuln_type == "secret" else "dependency_vulnerability"
+        rule = "trivy_container_vulnerability" if category == "container_security" else "trivy_secret" if category == "secret_leakage" else "trivy_iac_issue" if category == "infrastructure_as_code" else "trivy_vulnerability"
+        for vuln in result.get("Vulnerabilities", []):
+            severity = vuln.get("Severity", "MEDIUM").title()
+            findings.append(_external_finding("trivy", category, rule, severity, "HIGH" if severity in {"Critical", "High"} else "MEDIUM", file=target, evidence=json.dumps(vuln, ensure_ascii=False), impact="Trivy reported a security issue.", recommendation=vuln.get("PrimaryURL") or "Review the Trivy finding and remediate the underlying issue.", production_blocker=severity == "Critical" or (severity == "High" and category in {"container_security", "dependency_vulnerability"}), extra={"vulnerability_id": vuln.get("VulnerabilityID"), "title": vuln.get("Title")}))
+    return findings
+
+
+def parse_codeql(output: str):
+    data = _load_json(output)
+    if not data:
+        return []
+    findings = []
+    for item in data.get("runs", [{}])[0].get("results", []):
+        loc = (item.get("locations") or [{}])[0].get("physicalLocation", {})
+        findings.append(_external_finding("codeql", "static_code_security", "codeql_finding", "High", "HIGH", file=loc.get("artifactLocation", {}).get("uri"), line=loc.get("region", {}).get("startLine"), evidence=item.get("message", {}).get("text"), impact="CodeQL identified a security query result.", recommendation="Review the CodeQL alert and remediate the code path.", production_blocker=True, extra={"rule": item.get("ruleId")}))
+    return findings
+
+
+def run_external_engines(target_repo: Path, quiet: bool = False):
+    findings = []
+    warnings = []
+    commands = [
+        ("npm audit", ["npm", "audit", "--json"], parse_npm_audit),
+        ("pip-audit", ["pip-audit", "--format", "json"], parse_pip_audit),
+        ("semgrep", ["semgrep", "--json", "--quiet", "--config", "auto"], parse_semgrep),
+        ("gitleaks", ["gitleaks", "detect", "--report-format", "json", "--no-banner"], parse_gitleaks),
+        ("trivy", ["trivy", "fs", "--format", "json", "--quiet"], parse_trivy),
+        ("codeql", ["codeql", "database", "analyze", "--format=json"], parse_codeql),
+    ]
+    for label, command, parser in commands:
+        if not tool_available(command[0]):
+            warnings.append({"rule": "scanner_unavailable", "scanner": label, "message": f"{label} is not installed; skipping optional external scan."})
+            log_line(f"{label} unavailable; skipping.", kind="warning", quiet=quiet)
+            continue
+        result = run_optional_tool(command, target_repo)
+        if result is None:
+            warnings.append({"rule": "scanner_failed", "scanner": label, "message": f"{label} could not be started."})
+            continue
+        if result.returncode not in {0, 1}:
+            warnings.append({"rule": "scanner_failed", "scanner": label, "message": f"{label} exited with code {result.returncode}."})
+            log_line(f"{label} failed; continuing.", kind="warning", quiet=quiet)
+            continue
+        try:
+            parsed = parser(result.stdout or "")
+        except Exception as exc:
+            warnings.append({"rule": "scanner_failed", "scanner": label, "message": f"{label} output could not be parsed: {exc}"})
+            log_line(f"{label} output parse failed; continuing.", kind="warning", quiet=quiet)
+            continue
+        findings.extend(parsed)
+    return findings, warnings
 
 
 def emit(message: str, quiet: bool = False):
@@ -304,6 +487,94 @@ def _finding_evidence_summary(finding):
     }
 
 
+def _redact_sensitive_text(text):
+    if not text:
+        return text
+    redacted = str(text)
+    replacements = [
+        ("AKIA", "AKIA[REDACTED]"),
+        ("sk-", "sk-[REDACTED]"),
+        ("service-role", "[REDACTED]"),
+        ("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n[REDACTED]"),
+    ]
+    for needle, replacement in replacements:
+        if needle in redacted:
+            redacted = redacted.replace(needle, replacement)
+    return redacted
+
+
+def _exposure_what(finding):
+    if finding.get("category") == "leaked_secrets":
+        return "Secret material appears to be committed in the repository."
+    if finding.get("category") == "data_exfiltration":
+        return "Repository code may send data to an external destination."
+    if finding.get("category") == "retrieval_poisoning":
+        return "Retrieved content may override instructions or steer downstream behavior."
+    if finding.get("category") == "agentic_security":
+        return "Agent instructions or tool policy may expand privileges without a human gate."
+    if finding.get("category") == "framework_security":
+        return "Framework code may expose data or privileged actions without a guard."
+    if finding.get("category") == "unsafe_execution":
+        return "Code may execute shell commands or dynamic input."
+    return finding.get("impact") or "Security-sensitive code or configuration was detected."
+
+
+def _exposure_where(finding):
+    location = format_location(finding)
+    return location if location and location != "-" else finding.get("file") or "-"
+
+
+def _exposure_attack_entry(finding):
+    source_class, sink_class = _path_classes(finding)
+    if source_class == "prompt":
+        return "Untrusted prompt text or user input influences a privileged action."
+    if source_class == "retrieval":
+        return "Retrieved content is treated as instruction instead of data."
+    if source_class == "memory":
+        return "Persistent context or memory is reused without review."
+    if source_class == "tool":
+        return "Tool configuration or tool output can reach a privileged sink."
+    if source_class == "environment":
+        return "Environment-driven values can steer the sink."
+    if sink_class == "network":
+        return "User-controlled data reaches an outbound request."
+    if sink_class == "execution":
+        return "User-controlled data reaches command execution."
+    if sink_class == "credential":
+        return "Sensitive values are read or emitted without sufficient boundary checks."
+    return "A repository-controlled value reaches a security-sensitive sink."
+
+
+def _exposure_attack_path(finding):
+    source_class, sink_class = _path_classes(finding)
+    if source_class and sink_class:
+        return f"{source_class.title()} -> {sink_class.title()}"
+    if finding.get("category") == "retrieval_poisoning":
+        return "Retrieval -> Prompt -> Tool"
+    if finding.get("category") == "data_exfiltration":
+        return "Input -> Network request -> External destination"
+    return "Repository input -> Sensitive sink"
+
+
+def _exposure_impact(finding):
+    return finding.get("impact") or "This may expose sensitive data, enable unsafe execution, or weaken production controls."
+
+
+def _exposure_recommended_fix(finding):
+    return finding.get("recommendation") or "Review the flagged code path and narrow the trust boundary."
+
+
+def build_exposure(finding):
+    return {
+        "what": _exposure_what(finding),
+        "where": _exposure_where(finding),
+        "attack_entry": _exposure_attack_entry(finding),
+        "attack_path": _exposure_attack_path(finding),
+        "impact": _exposure_impact(finding),
+        "recommended_fix": _exposure_recommended_fix(finding),
+    }
+
+
 def _path_classes(finding):
     source_class = None
     sink_class = None
@@ -393,6 +664,12 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "remediation_priority": REMEDIATION_PRIORITY.get(finding["severity"], "RECOMMENDED"),
             "trust_boundary": metadata.get("trust_boundary", ["unknown"]),
             "production_blocker": production_blocker,
+            "evidence_redacted": _redact_sensitive_text(finding.get("evidence_redacted") or finding.get("evidence")),
+            "exposure": build_exposure({
+                **finding,
+                "impact": metadata.get("impact", "Review the finding and validate whether it is a real risk."),
+                "recommendation": RULE_RECOMMENDATIONS.get(finding["rule"], metadata.get("recommendation", "Review the flagged code or configuration and reduce the risky pattern.")),
+            }),
             **_finding_evidence_summary(finding),
         })
     return {"findings": findings, "correlations": scored["correlations"]}
@@ -1488,7 +1765,12 @@ def format_location(finding):
     return finding["file"] or "-"
 
 
-def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None):
+def finding_heading(finding):
+    bucket = (finding.get("confidence_bucket") or "Unknown").strip() or "Unknown"
+    return f"[{bucket}] {finding['id']}"
+
+
+def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None, external_summary=None, explain: bool = False):
     findings = sorted(scored["findings"], key=severity_sort_key)
     unsuppressed_findings = list(findings)
     findings, active_suppressions, expired_suppressions, ignored_findings = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
@@ -1548,6 +1830,34 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     else:
         lines.append("  - None")
 
+    def _finding_block(finding):
+        exposure = finding.get("exposure") or build_exposure(finding)
+        lines_block = [
+            f"### {finding_heading(finding)}",
+            f"- Rule: {finding['rule']}",
+            f"- Category: {finding['category']}",
+            f"- Severity: {finding['severity']}",
+            f"- Confidence: {finding['confidence_level']}",
+            f"- Confidence bucket: {finding.get('confidence_bucket') or 'Unknown'}",
+            f"- File path: {finding.get('file') or '-'}",
+            f"- Line number: {finding.get('line') or '-'}",
+            f"- Evidence snippet: {finding.get('evidence_redacted') or finding.get('evidence_snippet') or '-'}",
+            f"- What is exposed or at risk: {exposure['what']}",
+            f"- Where the exposure happens: {exposure['where']}",
+            f"- Possible attack scenario: {exposure['attack_entry']}",
+            f"- Why it matters: {exposure['impact']}",
+            f"- Recommended fix: {exposure['recommended_fix']}",
+            f"- Safer code or configuration pattern: {finding.get('recommendation')}",
+            f"- Production impact: {'Blocks production' if finding.get('production_blocker') else 'Review required before production'}",
+            f"- Blocks production: {'Yes' if finding.get('production_blocker') else 'No'}",
+        ]
+        if explain:
+            lines_block.extend([
+                f"- Attack path: {exposure['attack_path']}",
+                f"- Exposure summary: {exposure['what']} at {exposure['where']}.",
+            ])
+        return lines_block
+
     lines.extend([
         "",
         "## Production Readiness",
@@ -1563,6 +1873,109 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     lines.extend([
         "",
         render_audit_trail(audit_trail),
+        "",
+        "## Cybersecurity Exposure Map",
+    ])
+    for finding in findings[:10]:
+        exposure = finding.get("exposure") or build_exposure(finding)
+        lines.append(f"- {finding['id']} -> {exposure['attack_path']} ({finding.get('file') or '-'}:{finding.get('line') or '-'})")
+
+    lines.extend([
+        "",
+        "## Leakage Findings",
+    ])
+    if findings:
+        for finding in findings[:10]:
+            lines.extend(_finding_block(finding))
+            lines.append("")
+    else:
+        lines.append("No leakage findings identified.")
+
+    lines.extend([
+        "## Attack Paths",
+    ])
+    if paths:
+        for path in paths:
+            related_findings = [finding for finding in findings if finding["id"] in set(path.get("evidence", []))]
+            heading = finding_heading(related_findings[0]) if related_findings else f"[{path.get('risk', 'Unknown')}] {path['boundary']}"
+            lines.append(f"- {heading}: {path['source']} -> {path['sink']} ({path['risk']}, confidence {path.get('confidence_score', '-')})")
+            if explain:
+                lines.append(f"  - Source: {path['source']}")
+                lines.append(f"  - Boundary crossed: {path['boundary']}")
+                lines.append(f"  - Sink: {path['sink']}")
+                lines.append(f"  - Trigger condition: {path['data_flow_summary']}")
+                lines.append("  - Likely attacker action: Poison input or steer repository-controlled data into the sink.")
+                lines.append("  - Business impact: Data exfiltration, unsafe execution, or privilege expansion.")
+                lines.append("  - Recommended mitigation: Use allowlists, validation, and human approval gates.")
+    else:
+        lines.append("No supported attack paths were inferred.")
+
+    lines.extend([
+        "",
+        "## Exploitable Entry Points",
+    ])
+    for finding in findings[:10]:
+        lines.append(f"- {format_location(finding)} - {finding['rule']} ({finding['severity']})")
+
+    lines.extend([
+        "",
+        "## Affected Files and Lines",
+    ])
+    for finding in findings[:10]:
+        lines.append(f"- {finding.get('file') or '-'}:{finding.get('line') or '-'} - {finding['id']}")
+
+    lines.extend([
+        "",
+        "## Root Cause",
+    ])
+    for finding in findings[:10]:
+        lines.append(f"- {finding['id']}: {finding.get('recommendation')}")
+
+    lines.extend([
+        "",
+        "## Recommended Fixes",
+    ])
+    for finding in findings[:10]:
+        lines.append(f"- {finding_heading(finding)}: {finding.get('recommendation')}")
+
+    lines.extend([
+        "",
+        "## Production Blockers",
+    ])
+    blockers = [finding for finding in findings if finding.get("production_blocker")]
+    if blockers:
+        for finding in blockers[:10]:
+            lines.append(f"- {finding['id']} - {finding['rule']} ({finding['severity']}, {finding['confidence_level']})")
+    else:
+        lines.append("No production blockers identified.")
+
+    lines.extend([
+        "",
+        "## Review Items",
+    ])
+    if recommended:
+        for finding in recommended[:10]:
+            lines.append(f"- {finding_heading(finding)} ({finding['severity']}, {finding['confidence_level']}) {finding['rule']} - {finding.get('recommendation')}")
+    else:
+        lines.append("No review items identified.")
+
+    false_positive_notes = [finding for finding in findings if finding["confidence_level"] == "LOW" or "test" in set(finding.get("scope_tags", []))]
+    lines.extend([
+        "",
+        "## False Positive Notes",
+    ])
+    if false_positive_notes:
+        for finding in false_positive_notes[:10]:
+            lines.append(f"- {finding['id']} - requires review; confidence {finding['confidence_level']}")
+    else:
+        lines.append("No false positive notes identified.")
+
+    lines.extend([
+        "",
+        "## Re-scan Instructions",
+        f"- Run: `trustboundary \"{repo_path}\" --sarif" + (" --explain" if explain else "") + "`",
+        "- Re-run after remediation and before release approval.",
+        "- If you enable `--full`, external tools may add findings when installed locally.",
         "",
         "## Top Risks",
     ])
@@ -1635,16 +2048,6 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
             lines.append(f"- ... and {len(required) - 10} more in JSON")
     else:
         lines.append(f"No {blocker_label.lower()} identified.")
-
-    lines.extend([
-        "",
-        "## Review Items",
-    ])
-    if recommended:
-        for finding in recommended[:10]:
-            lines.append(f"- {finding['id']} ({finding['severity']}, {finding['confidence_level']}) {finding['rule']} - {finding.get('recommendation')}")
-    else:
-        lines.append("No review items identified.")
 
     documentation_notes = [finding for finding in findings if is_documentation_finding(finding)]
     lines.extend([
@@ -1766,6 +2169,20 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     else:
         lines.append("No framework-specific findings identified.")
 
+    lines.extend([
+        "",
+        "## External Cybersecurity Engines",
+    ])
+    if external_summary and external_summary.get("engines"):
+        for engine in external_summary["engines"]:
+            lines.append(f"- {engine['name']}: {engine['status']} ({engine['finding_count']} finding(s))")
+        if external_summary.get("warnings"):
+            lines.append("- Warnings:")
+            for warning in external_summary["warnings"]:
+                lines.append(f"  - {warning.get('scanner', 'unknown')}: {warning.get('message', '-')}")
+    else:
+        lines.append("External engines were not run.")
+
     if scored["correlations"]:
         lines.extend(["", "## Cross-Category Correlations"])
         for correlation in scored["correlations"]:
@@ -1842,7 +2259,7 @@ def render_audit_trail(audit_trail):
     return "\n".join(lines)
 
 
-def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None):
+def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None, external_summary=None):
     findings = list(scored["findings"])
     unsuppressed_findings = list(findings)
     findings, active_suppressions, expired_suppressions, ignored_findings = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
@@ -1859,7 +2276,7 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
         for scope in ["production", "test", "dependency", "generated", "documentation"]
     }
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "repo": {
             "name": repo_path.name or str(repo_path),
             "path": str(repo_path),
@@ -1897,6 +2314,7 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
             "accepted_findings": risk_state["accepted_findings"],
         },
         "scope": scope_summary,
+        "external_cybersecurity_engines": external_summary or {"engines": [], "warnings": [], "findings": []},
         "trust_boundary": boundary_summary(findings),
         "top_risks": top_risks(findings, repo_config=repo_config),
         "attack_surface": surface,
@@ -1924,7 +2342,7 @@ def _sarif_level(severity: str) -> str:
     return SARIF_SEVERITY_MAP.get(severity, "warning")
 
 
-def build_sarif_output(repo_path: Path, findings, repo_config=None):
+def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: bool = False):
     def _rule_sort_key(rule):
         return (
             rule.get("fullDescription", {}).get("text", ""),
@@ -1963,6 +2381,7 @@ def build_sarif_output(repo_path: Path, findings, repo_config=None):
                 "trust_boundary": finding.get("trust_boundary"),
                 "production_blocker": finding.get("production_blocker"),
                 "status": finding.get("status"),
+                "exposure": finding.get("exposure"),
             },
         }
 
@@ -1984,8 +2403,11 @@ def build_sarif_output(repo_path: Path, findings, repo_config=None):
                 "trust_boundary": finding.get("trust_boundary"),
                 "production_blocker": finding.get("production_blocker"),
                 "status": finding.get("status"),
+                "exposure": finding.get("exposure"),
             },
         }
+        if explain and finding.get("exposure"):
+            result["message"] = {"text": f"{result['message']['text']} Exposure path: {finding['exposure'].get('attack_path')}."}
         if finding.get("file"):
             physical_location = {
                 "artifactLocation": {"uri": Path(finding["file"]).as_posix()},
@@ -2024,7 +2446,9 @@ def main(argv=None):
     parser.add_argument("--include-dependencies", action="store_true")
     parser.add_argument("--include-tests", action="store_true")
     parser.add_argument("--include-env-files", action="store_true")
+    parser.add_argument("--full", action="store_true")
     parser.add_argument("--sarif", action="store_true")
+    parser.add_argument("--explain", action="store_true")
     args = parser.parse_args(argv)
 
     if args.repo == "scan" and args.subcommand:
@@ -2046,7 +2470,7 @@ def main(argv=None):
         emit("Repository Trust Boundary Auditor", args.quiet)
         emit(f"Target: {target_repo}", args.quiet)
         excluded_directories = [".git", "node_modules", "dist", "build", ".venv", "venv", "env", ".tox", ".mypy_cache", ".pytest_cache", "__pycache__", "coverage", ".next", "out", "target", "vendor", "site-packages", ".venv-windows"]
-        emit("Mode: application source scan", args.quiet)
+        emit("Mode: application source scan" + (" + external engines" if args.full else ""), args.quiet)
         log_line(f"Excluded directories: {len(excluded_directories)}", kind="info", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         log_line("Scanning source files...", kind="info", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         repo_config = load_trustboundary_config(target_repo)
@@ -2062,6 +2486,24 @@ def main(argv=None):
             ignore_patterns=ignore_patterns + tuple(repo_config.exclusions) + tuple(repo_config.ignore_patterns),
             config=repo_config,
         )
+        external_summary = {"engines": [], "warnings": [], "findings": []}
+        if args.full:
+            emit("Running external cybersecurity engines...", args.quiet)
+            external_findings, external_warnings = run_external_engines(target_repo, quiet=args.quiet)
+            audit_warnings.extend(external_warnings)
+            external_summary = {
+                "engines": [
+                    {"name": "npm audit", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "npm audit")},
+                    {"name": "pip-audit", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "pip-audit")},
+                    {"name": "semgrep", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "semgrep")},
+                    {"name": "gitleaks", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "gitleaks")},
+                    {"name": "trivy", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "trivy")},
+                    {"name": "codeql", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "codeql")},
+                ],
+                "warnings": list(external_warnings),
+                "findings": list(external_findings),
+            }
+            raw_findings.extend(external_findings)
         audit_warnings = list(audit_warnings or []) + risk_acceptance_warnings(getattr(repo_config, "risk_acceptance", ()))
         emit("Scoring findings...", args.quiet)
         scored = score_findings(raw_findings, args.include_dependencies, args.include_tests, repo_config=repo_config)
@@ -2075,15 +2517,15 @@ def main(argv=None):
         report_path = Path.cwd() / "SECURITY_AUDIT_REPORT.md"
         sarif_path = Path.cwd() / "security-audit-findings.sarif"
         emit("Generating reports...", args.quiet)
-        json_output = build_json_output(target_repo, scored, scope_summary, audit_warnings=audit_warnings, repo_config=repo_config)
+        json_output = build_json_output(target_repo, scored, scope_summary, audit_warnings=audit_warnings, repo_config=repo_config, external_summary=external_summary)
         findings_path.write_text(json.dumps(json_output, indent=2), encoding="utf-8")
-        report = render_report(target_repo, scored, scope_summary, audit_warnings=audit_warnings, repo_config=repo_config)
+        report = render_report(target_repo, scored, scope_summary, audit_warnings=audit_warnings, repo_config=repo_config, external_summary=external_summary, explain=args.explain)
         warnings_block = render_audit_warnings(audit_warnings)
         if warnings_block:
             report += "\n" + warnings_block
         report_path.write_text(report, encoding="utf-8")
         if args.sarif:
-            sarif_output = build_sarif_output(target_repo, json_output["findings"], repo_config=repo_config)
+            sarif_output = build_sarif_output(target_repo, json_output["findings"], repo_config=repo_config, explain=args.explain)
             sarif_path.write_text(json.dumps(sarif_output, indent=2), encoding="utf-8")
         emit("")
         log_line("Done.", kind="success", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)

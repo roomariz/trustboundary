@@ -26,6 +26,26 @@ The report includes a production security gate, Top Risks, Trust Boundary Assess
 - `SECURITY_AUDIT_REPORT.md`
 - `security-audit-findings.sarif` when `--sarif` is used
 
+## Sample Report Excerpt
+
+```md
+## Leakage Findings
+
+### DATA_EXFILTRATION-0090: Network client usage
+- What is exposed or at risk: Request payloads may leave the repository boundary through outbound network calls.
+- Where: apps/matter-portal/app/api-utils.ts:12
+- Attack path: Prompt -> Network
+- Recommended fix: Use an allowlist of approved outbound hosts and validate URLs before fetch.
+- Release decision: REVIEW_REQUIRED
+```
+
+## What TrustBoundary does and does not do
+
+- TrustBoundary performs local, read-only cybersecurity and trust-boundary scanning.
+- TrustBoundary helps developers review repositories before production.
+- TrustBoundary does not certify that a repository is secure.
+- Findings are evidence-based review leads unless marked confirmed.
+
 ## Supported Usage
 
 Python 3 is required for the audit engine. On Windows, the npm global install uses a Node wrapper which locates Python automatically.
