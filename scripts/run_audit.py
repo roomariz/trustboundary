@@ -162,14 +162,14 @@ def emit(message: str, quiet: bool = False):
         print(message)
 
 
-def score_findings(raw_findings, include_dependencies: bool = False, include_tests: bool = False):
+def score_findings(raw_findings, include_dependencies: bool = False, include_tests: bool = False, repo_config=None):
     score_module = load_module("score")
     scored = score_module.score_findings(raw_findings, include_dependencies=include_dependencies, include_tests=include_tests)
     findings = []
     for finding in scored["findings"]:
         metadata = CATEGORY_METADATA.get(finding["category"], {})
         path = Path(finding.get("file") or "")
-        scope_tags = tuple(finding.get("scope_tags") or path_scope_tags(path))
+        scope_tags = tuple(finding.get("scope_tags") or path_scope_tags(path, repo_config))
         production_blocker = finding["severity"] == "Critical" or (finding["severity"] == "High" and finding["confidence_level"] == BLOCKING_CONFIDENCE)
         if finding["rule"] == "high_entropy_literal":
             production_blocker = False
@@ -253,11 +253,11 @@ def posture_label(counts):
     return "Strong"
 
 
-def release_decision(findings):
+def release_decision(findings, audit_warnings=None):
+    if audit_warnings:
+        return "REVIEW_REQUIRED"
     if any(f.get("production_blocker") for f in findings):
         return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("category") == "scanner_failure" for f in findings):
-        return "REVIEW_REQUIRED"
     if any(f.get("severity") == "Medium" or (f.get("severity") == "High" and f.get("confidence_level") != BLOCKING_CONFIDENCE) for f in findings):
         return "REVIEW_REQUIRED"
     if any(f.get("category") in {"prompt_injection", "mcp_tool_abuse", "data_exfiltration", "framework_security"} for f in findings):
@@ -532,6 +532,7 @@ def build_json_output(repo_path: Path, scored, scope_summary):
     findings = list(scored["findings"])
     counts = risk_counts(findings)
     decision = release_decision(findings)
+    surface = attack_surface_summary(findings)
     return {
         "schema_version": 2,
         "repo": {
@@ -545,11 +546,12 @@ def build_json_output(repo_path: Path, scored, scope_summary):
             "overall_posture": posture_label(counts),
             "release_decision": decision,
             "production_blockers": sum(1 for finding in findings if finding.get("production_blocker")),
+            "scope_counts": surface["findings_by_scope"],
         },
         "scope": scope_summary,
         "trust_boundary": boundary_summary(findings),
         "top_risks": top_risks(findings),
-        "attack_surface": attack_surface_summary(findings),
+        "attack_surface": surface,
         "trust_paths": trust_paths(findings),
         "framework_specific_findings": [
             {
