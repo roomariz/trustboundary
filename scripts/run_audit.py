@@ -101,6 +101,11 @@ def load_module(name: str):
     return module
 
 
+def emit(message: str, quiet: bool = False):
+    if not quiet:
+        print(message)
+
+
 def score_findings(raw_findings):
     score_module = load_module("score")
     scored = []
@@ -135,12 +140,23 @@ def score_findings(raw_findings):
     return {"findings": scored, "correlations": score_module.correlate(scored)}
 
 
-def scan_repo(target_repo: Path):
+def scan_repo(target_repo: Path, quiet: bool = False):
     all_findings = []
-    for module_name in SCANNER_MODULES:
+    total = len(SCANNER_MODULES)
+    labels = {
+        "scan_secrets": "Scanning secrets",
+        "scan_dependencies": "Scanning dependencies",
+        "scan_exec_patterns": "Scanning execution patterns",
+        "scan_exfil_patterns": "Scanning exfiltration patterns",
+        "scan_skills_and_mcp": "Scanning skills, plugins and MCP",
+        "scan_frameworks": "Scanning frameworks",
+    }
+    for index, module_name in enumerate(SCANNER_MODULES, start=1):
         scanner = load_module(module_name)
+        emit(f"[{index}/{total}] {labels.get(module_name, f'Scanning {module_name}') }...", quiet)
         module_findings = scanner.walk(str(target_repo))
         all_findings.extend(module_findings)
+        emit(f"[{index}/{total}] Done {labels.get(module_name, module_name)}.", quiet)
     return all_findings
 
 
@@ -476,6 +492,7 @@ def build_json_output(repo_path: Path, scored):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", nargs="?", default=".")
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
     target_repo = Path(args.repo).resolve()
@@ -484,14 +501,22 @@ def main():
         return 1
 
     try:
-        raw_findings = scan_repo(target_repo)
+        emit("Repository Trust Boundary Auditor", args.quiet)
+        emit(f"Target: {target_repo}", args.quiet)
+        raw_findings = scan_repo(target_repo, args.quiet)
+        emit("Scoring findings...", args.quiet)
         scored = score_findings(raw_findings)
         findings_path = Path.cwd() / "security-audit-findings.json"
         report_path = Path.cwd() / "SECURITY_AUDIT_REPORT.md"
+        emit("Generating reports...", args.quiet)
         findings_path.write_text(json.dumps(build_json_output(target_repo, scored), indent=2), encoding="utf-8")
         report_path.write_text(render_report(target_repo, scored), encoding="utf-8")
-        print(str(report_path))
-        print(str(findings_path))
+        emit("")
+        emit("Done.", args.quiet)
+        emit(f"Release Decision: {release_decision(scored['findings'])}", args.quiet)
+        emit(f"Findings: {len(scored['findings'])}", args.quiet)
+        emit(f"Report: {report_path.name}", args.quiet)
+        emit(f"JSON: {findings_path.name}", args.quiet)
         return 0
     except Exception as exc:
         print(f"Audit failed: {exc}", file=sys.stderr)

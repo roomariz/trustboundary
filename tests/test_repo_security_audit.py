@@ -19,6 +19,16 @@ def run_audit(repo: Path, cwd: Path):
     )
 
 
+def run_audit_cli(repo: Path, cwd: Path, *extra_args: str):
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *extra_args, str(repo)],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def write(path: Path, content: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -500,3 +510,37 @@ def test_validate_plugin_script_passes(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "Plugin validation passed" in result.stdout
+
+
+def test_cli_shows_progress_by_default(tmp_path):
+    repo = tmp_path / "progress"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    result = run_audit_cli(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "Repository Trust Boundary Auditor" in result.stdout
+    assert f"Target: {repo.resolve()}" in result.stdout
+    assert "[1/6] Scanning secrets..." in result.stdout
+    assert "[6/6] Done Scanning frameworks." in result.stdout
+    assert "Scoring findings..." in result.stdout
+    assert "Generating reports..." in result.stdout
+    assert "Done." in result.stdout
+    assert "Release Decision: READY_FOR_PRODUCTION" in result.stdout
+    assert "Findings: 0" in result.stdout
+    assert "Report: SECURITY_AUDIT_REPORT.md" in result.stdout
+    assert "JSON: security-audit-findings.json" in result.stdout
+
+
+def test_cli_quiet_suppresses_progress_but_writes_outputs(tmp_path):
+    repo = tmp_path / "quiet"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    result = run_audit_cli(repo, tmp_path, "--quiet")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    assert (tmp_path / "security-audit-findings.json").exists()
+    assert (tmp_path / "SECURITY_AUDIT_REPORT.md").exists()
