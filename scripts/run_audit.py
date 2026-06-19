@@ -32,6 +32,7 @@ SCANNER_MODULES = [
     "scan_exec_patterns",
     "scan_exfil_patterns",
     "scan_prompt_injection",
+    "scan_memory_poisoning",
     "scan_retrieval_poisoning",
     "scan_skills_and_mcp",
     "scan_frameworks",
@@ -84,9 +85,9 @@ CATEGORY_METADATA = {
         "trust_boundary": ["agent", "prompt"],
     },
     "agentic_security": {
-        "impact": "Repository content may instruct an agent to override prompts, abuse tools, or extract hidden context.",
-        "recommendation": "Treat prompt-bearing content as untrusted data, quote it explicitly, and separate instructions from inputs.",
-        "trust_boundary": ["agent", "prompt"],
+        "impact": "Repository content may instruct an agent to override prompts, abuse tools, extract hidden context, or poison persistent memory.",
+        "recommendation": "Treat prompt-bearing and memory-bearing content as untrusted data, quote it explicitly, and separate instructions from inputs. Keep secrets out of long-lived agent state.",
+        "trust_boundary": ["agent", "prompt", "memory"],
     },
     "retrieval_poisoning": {
         "impact": "Retrieved corpus content may alter agent behavior, inject instructions, or poison downstream prompts and tools.",
@@ -240,6 +241,8 @@ def _path_classes(finding):
         source_class = "prompt"
     elif finding["category"] == "retrieval_poisoning":
         source_class = "retrieval"
+    elif finding["category"] == "agentic_security" and finding["rule"] in {"persistent_instruction", "cross_session_contamination", "hidden_memory_directive", "unsafe_memory_write", "sensitive_memory_storage"}:
+        source_class = "memory"
     elif finding["rule"] in {"environment_variable_access", "credential_env_passthrough"}:
         source_class = "environment"
     elif finding["rule"] in {"filesystem_read_access", "recursive_filesystem_operation"}:
@@ -276,6 +279,11 @@ def _trust_boundary_label(source_class: str, sink_class: str) -> str:
         ("retrieval", "prompt"): "Retrieval -> Prompt",
         ("retrieval", "tool"): "Retrieval -> Tool",
         ("retrieval", "execution"): "Retrieval -> Execution",
+        ("memory", "prompt"): "Memory -> Prompt",
+        ("memory", "tool"): "Memory -> Tool",
+        ("memory", "credential"): "Memory -> Credential",
+        ("memory", "network"): "Memory -> Network",
+        ("memory", "execution"): "Memory -> Execution",
         ("tool", "execution"): "Tool -> Execution",
         ("tool", "filesystem"): "Tool -> Filesystem",
         ("tool", "credential"): "Tool -> Credential",
@@ -789,6 +797,71 @@ def trust_paths(findings):
             ],
             "data_flow_summary": "MCP environment fields can expose credential material.",
         })
+    memory_findings = [f for f in findings if f.get("category") == "agentic_security" and f.get("rule") in {"persistent_instruction", "cross_session_contamination", "hidden_memory_directive", "unsafe_memory_write", "sensitive_memory_storage"}]
+    if memory_findings:
+        source_item = memory_findings[0]
+        paths.extend([
+            {
+                "path_type": "source_to_sink",
+                "correlation_type": "same_file" if len({f.get("file") for f in memory_findings if f.get("file")}) == 1 else "cross_file",
+                "boundary": "Memory -> Prompt",
+                "source": "Persistent Memory",
+                "source_class": "memory",
+                "sink": "Prompt Sink",
+                "sink_class": "prompt",
+                "risk": "High",
+                "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in memory_findings) else "Medium",
+                "confidence_score": 90,
+                "evidence": [source_item["id"]],
+                "evidence_details": [{"finding_id": source_item["id"], "file": source_item.get("file"), "line": source_item.get("line"), "role": "source"}],
+                "data_flow_summary": "Persistent memory can influence future prompt construction.",
+            },
+            {
+                "path_type": "source_to_sink",
+                "correlation_type": "same_file" if len({f.get("file") for f in memory_findings if f.get("file")}) == 1 else "cross_file",
+                "boundary": "Memory -> Tool",
+                "source": "Persistent Memory",
+                "source_class": "memory",
+                "sink": "Tool Sink",
+                "sink_class": "tool",
+                "risk": "High",
+                "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in memory_findings) else "Medium",
+                "confidence_score": 89,
+                "evidence": [source_item["id"]],
+                "evidence_details": [{"finding_id": source_item["id"], "file": source_item.get("file"), "line": source_item.get("line"), "role": "source"}],
+                "data_flow_summary": "Persistent memory can influence tool selection and invocation.",
+            },
+            {
+                "path_type": "source_to_sink",
+                "correlation_type": "same_file" if len({f.get("file") for f in memory_findings if f.get("file")}) == 1 else "cross_file",
+                "boundary": "Memory -> Credential",
+                "source": "Persistent Memory",
+                "source_class": "memory",
+                "sink": "Credential Sink",
+                "sink_class": "credential",
+                "risk": "Critical",
+                "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in memory_findings) else "Medium",
+                "confidence_score": 92,
+                "evidence": [source_item["id"]],
+                "evidence_details": [{"finding_id": source_item["id"], "file": source_item.get("file"), "line": source_item.get("line"), "role": "source"}],
+                "data_flow_summary": "Persistent memory can retain and expose credentials or secrets.",
+            },
+            {
+                "path_type": "source_to_sink",
+                "correlation_type": "same_file" if len({f.get("file") for f in memory_findings if f.get("file")}) == 1 else "cross_file",
+                "boundary": "Memory -> Execution",
+                "source": "Persistent Memory",
+                "source_class": "memory",
+                "sink": "Execution Sink",
+                "sink_class": "execution",
+                "risk": "High",
+                "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in memory_findings) else "Medium",
+                "confidence_score": 91,
+                "evidence": [source_item["id"]],
+                "evidence_details": [{"finding_id": source_item["id"], "file": source_item.get("file"), "line": source_item.get("line"), "role": "source"}],
+                "data_flow_summary": "Persistent memory can drive future execution behavior.",
+            },
+        ])
     if any(f["category"] == "framework_security" for f in findings):
         paths.append({
             "path_type": "source_to_sink",
@@ -856,6 +929,30 @@ def attack_chains(trust_paths_items):
             "reason": "Retrieved content can shape prompts and then influence tool use.",
             "confidence_score": 89,
             "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Retrieval ->")),
+        })
+    if has_source("memory") and has_sink("prompt") and has_sink("tool"):
+        chains.append({
+            "name": "Memory -> Prompt -> Tool",
+            "risk": "Critical",
+            "reason": "Persistent memory can shape prompts and then influence tool use.",
+            "confidence_score": 91,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Memory ->")),
+        })
+    if has_source("memory") and has_sink("credential") and has_sink("network"):
+        chains.append({
+            "name": "Memory -> Credential -> Network",
+            "risk": "Critical",
+            "reason": "Persistent memory can retain secrets that later flow into outbound requests.",
+            "confidence_score": 92,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Memory ->")),
+        })
+    if has_source("memory") and has_sink("prompt") and has_sink("execution"):
+        chains.append({
+            "name": "Memory -> Prompt -> Execution",
+            "risk": "High",
+            "reason": "Persistent memory can shape prompts and then reach execution sinks.",
+            "confidence_score": 90,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Memory ->")),
         })
     if has_source("prompt") and has_sink("execution"):
         chains.append({
@@ -1023,6 +1120,9 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     ]
     agentic_findings = [finding for finding in findings if finding.get("category") == "agentic_security"]
     retrieval_findings = [finding for finding in findings if finding.get("category") == "retrieval_poisoning"]
+    memory_findings = [finding for finding in findings if finding.get("category") == "agentic_security" and finding.get("rule") in {"persistent_instruction", "cross_session_contamination", "hidden_memory_directive", "unsafe_memory_write", "sensitive_memory_storage"}]
+    memory_examples = ", ".join(f"{finding['rule']} ({finding.get('file')})" for finding in memory_findings[:3]) if memory_findings else "None"
+    memory_highest = min((finding["severity"] for finding in memory_findings), key=lambda sev: SEVERITY_ORDER.get(sev, 9)) if memory_findings else "-"
     lines.extend([
         "",
         "## Agentic AI Security",
@@ -1030,6 +1130,11 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         f"- Tool Abuse Findings: {sum(1 for finding in agentic_findings if finding.get('rule') == 'tool_abuse_instruction')}",
         f"- Prompt Extraction Findings: {sum(1 for finding in agentic_findings if finding.get('rule') == 'prompt_extraction')}",
         f"- Retrieval Poisoning Findings: {len(retrieval_findings)}",
+        "",
+        "### Memory / Persistent Context Risks",
+        f"- Finding count: {len(memory_findings)}",
+        f"- Highest severity: {memory_highest}",
+        f"- Representative examples: {memory_examples}",
     ])
     if risks:
         for index, finding in enumerate(risks, start=1):

@@ -156,6 +156,8 @@ def adjust_confidence(finding):
         score = min(score, 85)
     if finding.get("category") == "retrieval_poisoning":
         score = min(score, 90)
+    if finding.get("category") == "agentic_security" and finding.get("rule") in {"persistent_instruction", "cross_session_contamination", "hidden_memory_directive", "unsafe_memory_write", "sensitive_memory_storage"}:
+        score = min(score, 90)
     return max(0, min(100, score))
 
 
@@ -215,6 +217,14 @@ def severity_for_finding(finding):
     if finding["category"] == "retrieval_poisoning":
         if finding["rule"] in {"retrieval_prompt_injection", "retrieval_tool_instructions", "retrieval_policy_violation", "untrusted_retrieval_ingestion"}:
             return "High"
+        return "Medium"
+    if finding["category"] == "agentic_security" and finding["rule"] in {"persistent_instruction", "cross_session_contamination", "hidden_memory_directive", "unsafe_memory_write", "sensitive_memory_storage"}:
+        if finding["rule"] == "sensitive_memory_storage":
+            return "High"
+        if finding["rule"] == "persistent_instruction":
+            return "High"
+        if finding["rule"] == "unsafe_memory_write":
+            return "Medium"
         return "Medium"
 
     return severity
