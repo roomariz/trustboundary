@@ -20,7 +20,8 @@ PATTERNS = [
 
 def scan_file(path, findings):
     try:
-        lines = open(path, errors="ignore").readlines()
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            lines = handle.readlines()
     except Exception:
         return
     for lineno, line in enumerate(lines, start=1):

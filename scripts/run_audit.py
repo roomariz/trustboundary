@@ -209,12 +209,12 @@ def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool
         if count and count % 250 == 0:
             log_line(f"Scanning... {count} files checked", kind="info", quiet=quiet, colour_enabled=colour_enabled, use_icons=use_icons)
     for index, module_name in enumerate(SCANNER_MODULES, start=1):
-        scanner = load_module(module_name)
-        emit(f"[{index}/{total}] {labels.get(module_name, f'Scanning {module_name}') }...", quiet)
-        started = time.perf_counter()
         if config and config.enabled_scanners and module_name not in config.enabled_scanners:
             continue
+        emit(f"[{index}/{total}] {labels.get(module_name, f'Scanning {module_name}') }...", quiet)
+        started = time.perf_counter()
         try:
+            scanner = load_module(module_name)
             try:
                 module_findings = scanner.walk(
                     str(target_repo),
@@ -535,10 +535,10 @@ def render_audit_warnings(warnings):
     return "\n".join(lines) + "\n"
 
 
-def build_json_output(repo_path: Path, scored, scope_summary):
+def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None):
     findings = list(scored["findings"])
     counts = risk_counts(findings)
-    decision = release_decision(findings)
+    decision = release_decision(findings, audit_warnings=audit_warnings)
     surface = attack_surface_summary(findings)
     return {
         "schema_version": 2,
@@ -553,11 +553,12 @@ def build_json_output(repo_path: Path, scored, scope_summary):
             "overall_posture": posture_label(counts),
             "release_decision": decision,
             "production_blockers": sum(1 for finding in findings if finding.get("production_blocker")),
+            "scanner_failures": len(audit_warnings or []),
             "scope_counts": surface["findings_by_scope"],
         },
         "scope": scope_summary,
         "trust_boundary": boundary_summary(findings),
-        "top_risks": top_risks(findings),
+        "top_risks": top_risks(findings, repo_config=repo_config),
         "attack_surface": surface,
         "trust_paths": trust_paths(findings),
         "framework_specific_findings": [
@@ -574,6 +575,7 @@ def build_json_output(repo_path: Path, scored, scope_summary):
         ],
         "findings": findings,
         "correlations": scored["correlations"],
+        "audit_warnings": list(audit_warnings or []),
     }
 
 
@@ -589,9 +591,10 @@ def main(argv=None):
     parser.add_argument("--include-env-files", action="store_true")
     args = parser.parse_args(argv)
 
+    if args.repo == "scan" and args.subcommand:
+        args.repo, args.subcommand = args.subcommand, None
+
     target_repo = Path(args.repo).resolve()
-    if args.subcommand and args.repo == "scan":
-        target_repo = Path(args.subcommand).resolve()
     if not target_repo.exists():
         print(f"Target repository does not exist: {target_repo}", file=sys.stderr)
         return 1
@@ -624,7 +627,7 @@ def main(argv=None):
             config=repo_config,
         )
         emit("Scoring findings...", args.quiet)
-        scored = score_findings(raw_findings, args.include_dependencies, args.include_tests)
+        scored = score_findings(raw_findings, args.include_dependencies, args.include_tests, repo_config=repo_config)
         scope_summary = {
             "files_scanned": files_checked,
             "files_skipped": max(0, files_checked - len(raw_findings)),
@@ -634,23 +637,16 @@ def main(argv=None):
         findings_path = Path.cwd() / "security-audit-findings.json"
         report_path = Path.cwd() / "SECURITY_AUDIT_REPORT.md"
         emit("Generating reports...", args.quiet)
-        json_output = build_json_output(target_repo, scored, scope_summary)
-        if audit_warnings:
-            json_output["audit_warnings"] = audit_warnings
-            json_output["summary"]["scanner_failures"] = len(audit_warnings)
-            json_output["summary"]["release_decision"] = "REVIEW_REQUIRED"
+        json_output = build_json_output(target_repo, scored, scope_summary, audit_warnings=audit_warnings, repo_config=repo_config)
         findings_path.write_text(json.dumps(json_output, indent=2), encoding="utf-8")
-        report = render_report(target_repo, scored, scope_summary)
-        warnings_block = render_audit_warnings(audit_warnings)
-        if warnings_block:
-            report += "\n" + warnings_block
+        report = render_report(target_repo, scored, scope_summary, audit_warnings=audit_warnings, repo_config=repo_config)
         report_path.write_text(report, encoding="utf-8")
         emit("")
         log_line("Done.", kind="success", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         emit(f"Total elapsed: {time.perf_counter() - started:.1f}s", args.quiet)
         emit(f"Files scanned: {scope_summary['files_scanned']}", args.quiet)
         emit(f"Files skipped: {scope_summary['files_skipped']}", args.quiet)
-        decision = release_decision(scored["findings"])
+        decision = release_decision(scored["findings"], audit_warnings=audit_warnings)
         decision_kind = "success" if decision == "READY_FOR_PRODUCTION" else "warning" if decision == "REVIEW_REQUIRED" else "error"
         log_line(f"Release Decision: {decision}", kind=decision_kind, quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         emit(f"Findings: {len(scored['findings'])}", args.quiet)
