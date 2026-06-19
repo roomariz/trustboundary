@@ -1,0 +1,44 @@
+name: TrustBoundary
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install TrustBoundary
+        run: npm install
+
+      - name: Run TrustBoundary scan
+        run: npx trustboundary scan . --sarif
+
+      - name: Upload audit artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustboundary-audit
+          path: |
+            SECURITY_AUDIT_REPORT.md
+            security-audit-findings.json
+            security-audit-findings.sarif
+
+      - name: Upload SARIF to GitHub code scanning
+        if: github.event_name == 'push'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: security-audit-findings.sarif
