@@ -434,6 +434,23 @@ def test_framework_specific_findings_and_gate(tmp_path):
     assert all(finding["confidence_level"] in {"LOW", "MEDIUM", "HIGH"} for finding in payload["findings"])
 
 
+def test_not_ready_for_production_report_uses_production_blockers_section(tmp_path):
+    repo = tmp_path / "not-ready"
+    repo.mkdir()
+    build_supabase_unsafe_fixture(repo)
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["release_decision"] == "NOT_READY_FOR_PRODUCTION"
+    assert payload["summary"]["production_blockers"] > 0
+
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "## Production Blockers" in report
+    assert "## Required Review" not in report
+
+
 def test_fastapi_fixture_differentiates_safe_and_unsafe_routes(tmp_path):
     unsafe_repo = tmp_path / "fastapi-unsafe"
     unsafe_repo.mkdir()
