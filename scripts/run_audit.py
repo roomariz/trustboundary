@@ -30,6 +30,7 @@ SCANNER_MODULES = [
     "scan_secrets",
     "scan_dependencies",
     "scan_exec_patterns",
+    "scan_autonomous_execution",
     "scan_exfil_patterns",
     "scan_prompt_injection",
     "scan_memory_poisoning",
@@ -243,6 +244,8 @@ def _path_classes(finding):
         source_class = "retrieval"
     elif finding["category"] == "agentic_security" and finding["rule"] in {"persistent_instruction", "cross_session_contamination", "hidden_memory_directive", "unsafe_memory_write", "sensitive_memory_storage"}:
         source_class = "memory"
+    elif finding["category"] == "agentic_security" and finding["rule"] in {"auto_run", "auto_execute", "unattended_execution", "spawn_agent", "create_sub_agent", "recursive_task", "self_improve", "self_modify", "delegate_until_done", "loop_until_success", "use_tools_automatically", "invoke_any_tool", "execute_tool_without_approval", "auto_call_tools", "indefinite_tool_retry", "auto_deploy", "push_to_main", "delete_production", "run_migration_automatically", "apply_terraform_automatically", "kubectl_apply", "docker_push", "npm_publish", "missing_human_gate"}:
+        source_class = "agent"
     elif finding["rule"] in {"environment_variable_access", "credential_env_passthrough"}:
         source_class = "environment"
     elif finding["rule"] in {"filesystem_read_access", "recursive_filesystem_operation"}:
@@ -262,6 +265,8 @@ def _path_classes(finding):
         sink_class = "credential"
     elif finding["category"] == "mcp_tool_abuse":
         sink_class = "tool"
+    elif finding["category"] == "agentic_security" and finding["rule"] in {"auto_deploy", "push_to_main", "delete_production", "run_migration_automatically", "apply_terraform_automatically", "kubectl_apply", "docker_push", "npm_publish"}:
+        sink_class = "deployment"
     return source_class, sink_class
 
 
@@ -287,6 +292,8 @@ def _trust_boundary_label(source_class: str, sink_class: str) -> str:
         ("tool", "execution"): "Tool -> Execution",
         ("tool", "filesystem"): "Tool -> Filesystem",
         ("tool", "credential"): "Tool -> Credential",
+        ("tool", "deployment"): "Tool -> Deployment",
+        ("prompt", "deployment"): "Prompt -> Deployment",
     }
     return labels.get((source_class, sink_class), f"{source_class.title()} -> {sink_class.title()}")
 
@@ -440,6 +447,7 @@ def boundary_summary(findings):
         "network_access": ["network", "external_communication"],
         "environment_access": ["credentials", "environment"],
         "execution_access": ["execution", "agent", "mcp"],
+        "deployment_access": ["deployment"],
     }
     summary = {}
     for key, tags in boundaries.items():
@@ -504,13 +512,16 @@ def trust_paths(findings):
         "network": [f for f in findings if _path_classes(f)[1] == "network"],
         "credential": [f for f in findings if _path_classes(f)[1] == "credential"],
         "tool": [f for f in findings if _path_classes(f)[1] == "tool"],
+        "deployment": [f for f in findings if _path_classes(f)[1] == "deployment"],
     }
     path_source_labels = {
         "prompt": "Prompt Input",
+        "agent": "Agent",
         "environment": "Environment Variable",
         "file": "File Input",
         "retrieval": "Retrieval Output",
         "tool": "MCP Tool Input",
+        "deployment": "Deployment Target",
     }
     path_sink_labels = {
         "execution": "Execution Sink",
@@ -520,6 +531,7 @@ def trust_paths(findings):
         "tool": "Tool Sink",
         "network": "Network Sink",
         "privileged_action": "Privileged Action Sink",
+        "deployment": "Deployment Target",
     }
     paths = []
     class_pairs = [
@@ -528,6 +540,11 @@ def trust_paths(findings):
         ("prompt", "network", "High", "Prompt data can reach outbound requests."),
         ("prompt", "tool", "High", "Prompt data can reach privileged tool use."),
         ("prompt", "privileged_action", "High", "Prompt data can reach privileged action paths."),
+        ("agent", "execution", "High", "Agent instructions can reach command execution."),
+        ("agent", "filesystem", "High", "Agent instructions can reach filesystem mutation."),
+        ("agent", "credential", "High", "Agent instructions can reach credential exposure."),
+        ("agent", "deployment", "Critical", "Agent instructions can reach deployment actions."),
+        ("agent", "tool", "High", "Agent instructions can reach privileged tool use."),
         ("environment", "execution", "Medium", "Environment values can influence execution paths."),
         ("environment", "network", "Medium", "Environment values can flow into outbound requests."),
         ("file", "execution", "Medium", "File-controlled data can reach execution sinks."),
@@ -540,6 +557,7 @@ def trust_paths(findings):
         ("tool", "filesystem", "Medium", "Tool-originated input can reach filesystem mutation."),
         ("tool", "credential", "High", "Tool-originated input can reach credential exposure."),
         ("tool", "network", "High", "Tool-originated input can reach outbound requests."),
+        ("tool", "deployment", "High", "Tool-originated input can reach deployment actions."),
     ]
     for source_key, sink_key, risk, summary in class_pairs:
         source_items = sources.get(source_key) or []
@@ -631,6 +649,110 @@ def trust_paths(findings):
                 }
             ],
             "data_flow_summary": "Prompt-like instructions can be treated as privileged action requests.",
+        })
+    agentic_execution_sources = [f for f in findings if f.get("category") == "agentic_security" and f.get("rule") in {"auto_run", "auto_execute", "unattended_execution", "spawn_agent", "create_sub_agent", "recursive_task", "self_improve", "self_modify", "delegate_until_done", "loop_until_success", "use_tools_automatically", "invoke_any_tool", "execute_tool_without_approval", "auto_call_tools", "indefinite_tool_retry", "auto_deploy", "push_to_main", "delete_production", "run_migration_automatically", "apply_terraform_automatically", "kubectl_apply", "docker_push", "npm_publish", "missing_human_gate"}]
+    if agentic_execution_sources:
+        source_item = agentic_execution_sources[0]
+        same_file = len({f.get("file") for f in agentic_execution_sources if f.get("file")}) == 1
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if same_file else "cross_file",
+            "boundary": "Agent -> Tool",
+            "source": "Agent",
+            "source_class": "agent",
+            "sink": "Tool Sink",
+            "sink_class": "tool",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in agentic_execution_sources) else "Medium",
+            "confidence_score": 88,
+            "evidence": [source_item["id"]],
+            "evidence_details": [{
+                "finding_id": source_item["id"],
+                "file": source_item.get("file"),
+                "line": source_item.get("line"),
+                "role": "source",
+            }],
+            "data_flow_summary": "Autonomous agent instructions can reach tool use without a human gate.",
+        })
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if same_file else "cross_file",
+            "boundary": "Agent -> Execution",
+            "source": "Agent",
+            "source_class": "agent",
+            "sink": "Execution Sink",
+            "sink_class": "execution",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in agentic_execution_sources) else "Medium",
+            "confidence_score": 89,
+            "evidence": [source_item["id"]],
+            "evidence_details": [{
+                "finding_id": source_item["id"],
+                "file": source_item.get("file"),
+                "line": source_item.get("line"),
+                "role": "source",
+            }],
+            "data_flow_summary": "Autonomous agent instructions can reach execution sinks.",
+        })
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if same_file else "cross_file",
+            "boundary": "Agent -> Filesystem",
+            "source": "Agent",
+            "source_class": "agent",
+            "sink": "Filesystem Sink",
+            "sink_class": "filesystem",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in agentic_execution_sources) else "Medium",
+            "confidence_score": 87,
+            "evidence": [source_item["id"]],
+            "evidence_details": [{
+                "finding_id": source_item["id"],
+                "file": source_item.get("file"),
+                "line": source_item.get("line"),
+                "role": "source",
+            }],
+            "data_flow_summary": "Autonomous agent instructions can reach filesystem mutation.",
+        })
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if same_file else "cross_file",
+            "boundary": "Agent -> Deployment",
+            "source": "Agent",
+            "source_class": "agent",
+            "sink": "Deployment Target",
+            "sink_class": "deployment",
+            "risk": "Critical",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in agentic_execution_sources) else "Medium",
+            "confidence_score": 92,
+            "evidence": [source_item["id"]],
+            "evidence_details": [{
+                "finding_id": source_item["id"],
+                "file": source_item.get("file"),
+                "line": source_item.get("line"),
+                "role": "source",
+            }],
+            "data_flow_summary": "Autonomous agent instructions can directly reach deployment actions.",
+        })
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if same_file else "cross_file",
+            "boundary": "Agent -> Credential",
+            "source": "Agent",
+            "source_class": "agent",
+            "sink": "Credential Sink",
+            "sink_class": "credential",
+            "risk": "High",
+            "confidence": "Medium",
+            "confidence_score": 84,
+            "evidence": [source_item["id"]],
+            "evidence_details": [{
+                "finding_id": source_item["id"],
+                "file": source_item.get("file"),
+                "line": source_item.get("line"),
+                "role": "source",
+            }],
+            "data_flow_summary": "Autonomous agent instructions can reach credential-handling paths.",
         })
     retrieval_poisoning_findings = [f for f in findings if f.get("category") == "retrieval_poisoning"]
     if retrieval_poisoning_findings:
@@ -914,6 +1036,22 @@ def attack_chains(trust_paths_items):
             "confidence_score": 91,
             "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Prompt ->")),
         })
+    if has_source("agent") and has_sink("tool") and has_sink("deployment"):
+        chains.append({
+            "name": "Agent -> Tool -> Deployment",
+            "risk": "Critical",
+            "reason": "Agent-controlled instructions can steer tool use into deployment actions.",
+            "confidence_score": 93,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and ("Deployment" in name or "Tool" in name)),
+        })
+    if has_source("agent") and has_sink("execution") and has_sink("deployment"):
+        chains.append({
+            "name": "Agent -> Tool -> Execution",
+            "risk": "Critical",
+            "reason": "Agent-controlled instructions can steer tools into execution sinks.",
+            "confidence_score": 92,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and ("Tool" in name or "Execution" in name)),
+        })
     if has_source("prompt") and has_sink("tool") and has_sink("filesystem"):
         chains.append({
             "name": "Prompt -> Tool -> Filesystem",
@@ -1119,10 +1257,13 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         "## Top Risks",
     ]
     agentic_findings = [finding for finding in findings if finding.get("category") == "agentic_security"]
+    autonomous_findings = [finding for finding in findings if finding.get("category") == "agentic_security" and finding.get("rule") in {"auto_run", "auto_execute", "unattended_execution", "spawn_agent", "create_sub_agent", "recursive_task", "self_improve", "self_modify", "delegate_until_done", "loop_until_success", "use_tools_automatically", "invoke_any_tool", "execute_tool_without_approval", "auto_call_tools", "indefinite_tool_retry", "auto_deploy", "push_to_main", "delete_production", "run_migration_automatically", "apply_terraform_automatically", "kubectl_apply", "docker_push", "npm_publish", "missing_human_gate"}]
     retrieval_findings = [finding for finding in findings if finding.get("category") == "retrieval_poisoning"]
     memory_findings = [finding for finding in findings if finding.get("category") == "agentic_security" and finding.get("rule") in {"persistent_instruction", "cross_session_contamination", "hidden_memory_directive", "unsafe_memory_write", "sensitive_memory_storage"}]
     memory_examples = ", ".join(f"{finding['rule']} ({finding.get('file')})" for finding in memory_findings[:3]) if memory_findings else "None"
     memory_highest = min((finding["severity"] for finding in memory_findings), key=lambda sev: SEVERITY_ORDER.get(sev, 9)) if memory_findings else "-"
+    autonomous_examples = ", ".join(f"{finding['rule']} ({finding.get('file')})" for finding in autonomous_findings[:3]) if autonomous_findings else "None"
+    autonomous_highest = min((finding["severity"] for finding in autonomous_findings), key=lambda sev: SEVERITY_ORDER.get(sev, 9)) if autonomous_findings else "-"
     lines.extend([
         "",
         "## Agentic AI Security",
@@ -1135,6 +1276,11 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         f"- Finding count: {len(memory_findings)}",
         f"- Highest severity: {memory_highest}",
         f"- Representative examples: {memory_examples}",
+        "",
+        "### Autonomous Execution Risks",
+        f"- Finding count: {len(autonomous_findings)}",
+        f"- Highest severity: {autonomous_highest}",
+        f"- Representative examples: {autonomous_examples}",
     ])
     if risks:
         for index, finding in enumerate(risks, start=1):
@@ -1236,7 +1382,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         "",
         "## Trust Boundary Profile",
     ])
-    for key in ["filesystem_access", "network_access", "environment_access", "execution_access"]:
+    for key in ["filesystem_access", "network_access", "environment_access", "execution_access", "deployment_access"]:
         item = trust_profile[key]
         lines.append(f"- {item['label']}: {item['finding_count']} finding(s), highest severity {item['highest_severity'] or '-'}, status {item['status']}")
 

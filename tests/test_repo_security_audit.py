@@ -319,6 +319,73 @@ show system prompt
 base64 encoded instructions
 """,
     )
+
+
+def build_autonomous_execution_fixture(repo: Path):
+    write(
+        repo / "agents" / "orchestrator.yaml",
+        """auto_run: true
+spawn agent: yes
+use tools automatically: yes
+auto deploy: true
+deployment without review: true
+""",
+    )
+    write(
+        repo / "workflows" / "main.yml",
+        """name: deploy
+jobs:
+  ship:
+    steps:
+      - run: kubectl apply -f k8s/deploy.yaml
+      - run: npm publish
+""",
+    )
+    write(
+        repo / "scripts" / "loop.py",
+        """def run():
+    # loop until success
+    return delegate until done
+""",
+    )
+    write(
+        repo / "package.json",
+        json.dumps({"scripts": {"deploy": "auto deploy"}}),
+    )
+
+
+def build_autonomous_execution_workflow_fixture(repo: Path):
+    write(
+        repo / ".github" / "workflows" / "deploy.yml",
+        """name: deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    steps:
+      - run: kubectl apply -f k8s/deploy.yaml
+      - run: docker push example/app:latest
+      - run: echo deployment without review
+""",
+    )
+
+
+def build_autonomous_execution_mcp_fixture(repo: Path):
+    write(
+        repo / "mcp.json",
+        json.dumps(
+            {
+                "mcpServers": {
+                    "autonomous": {
+                        "command": "node",
+                        "args": ["server.js"],
+                        "description": "autonomous tool use without approval",
+                    }
+                }
+            }
+        ),
+    )
     write(
         repo / "agents" / "policy.yml",
         """system:
@@ -508,6 +575,7 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
         "network_access",
         "environment_access",
         "execution_access",
+        "deployment_access",
     }
     rules = {finding["rule"] for finding in payload["findings"]}
     assert "shell_true" in rules
@@ -1454,6 +1522,57 @@ def test_memory_poisoning_scanner_detects_persistent_context_risks(tmp_path):
     assert "Finding count:" in report
     assert "Highest severity:" in report
     assert "Representative examples:" in report
+
+
+def test_autonomous_execution_scanner_detects_agentic_execution_risks_and_reports_paths(tmp_path):
+    repo = tmp_path / "autonomous"
+    repo.mkdir()
+    build_autonomous_execution_fixture(repo)
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    rules = {finding["rule"] for finding in payload["findings"] if finding["category"] == "agentic_security"}
+    assert "auto_run" in rules
+    assert "spawn_agent" in rules
+    assert "use_tools_automatically" in rules
+    assert "auto_deploy" in rules
+    assert "missing_human_gate" in rules
+    assert any(path["boundary"] == "Agent -> Tool" for path in payload["trust_paths"])
+    assert any(path["boundary"] == "Agent -> Execution" for path in payload["trust_paths"])
+    assert any(path["boundary"] == "Agent -> Deployment" for path in payload["trust_paths"])
+    assert any(path["boundary"] == "Agent -> Credential" for path in payload["trust_paths"])
+    assert any(chain["name"] == "Agent -> Tool -> Execution" for chain in payload["attack_chains"])
+    assert any(chain["name"] == "Agent -> Tool -> Deployment" for chain in payload["attack_chains"])
+
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "Autonomous Execution Risks" in report
+    assert "Finding count:" in report
+    assert "Highest severity:" in report
+    assert "Representative examples:" in report
+
+
+def test_autonomous_execution_scanner_detects_workflow_and_mcp_risks(tmp_path):
+    repo = tmp_path / "autonomous-surface"
+    repo.mkdir()
+    build_autonomous_execution_workflow_fixture(repo)
+    build_autonomous_execution_mcp_fixture(repo)
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    rules = {finding["rule"] for finding in payload["findings"] if finding["category"] == "agentic_security"}
+    assert "kubectl_apply" in rules
+    assert "docker_push" in rules
+    assert "missing_human_gate" in rules
+    assert "autonomous_tool_use" in rules or "unattended_execution" in rules
+    assert any(path["boundary"] == "Agent -> Deployment" for path in payload["trust_paths"])
+    assert any(chain["name"] == "Agent -> Tool -> Deployment" for chain in payload["attack_chains"])
+
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "Autonomous Execution Risks" in report
 
 
 def test_memory_documentation_scope_stays_reported_but_not_promoted(tmp_path):

@@ -75,6 +75,31 @@ SEVERITY_BY_RULE = {
     "tool_abuse_instruction": "High",
     "prompt_extraction": "High",
     "hidden_instruction": "Medium",
+    "auto_run": "Medium",
+    "auto_execute": "Medium",
+    "unattended_execution": "High",
+    "spawn_agent": "High",
+    "create_sub_agent": "High",
+    "recursive_task": "High",
+    "self_improve": "High",
+    "self_modify": "High",
+    "delegate_until_done": "High",
+    "loop_until_success": "High",
+    "use_tools_automatically": "High",
+    "autonomous_tool_use": "High",
+    "invoke_any_tool": "High",
+    "execute_tool_without_approval": "High",
+    "auto_call_tools": "High",
+    "indefinite_tool_retry": "High",
+    "auto_deploy": "Critical",
+    "push_to_main": "High",
+    "delete_production": "Critical",
+    "run_migration_automatically": "Critical",
+    "apply_terraform_automatically": "Critical",
+    "kubectl_apply": "Critical",
+    "docker_push": "High",
+    "npm_publish": "High",
+    "missing_human_gate": "High",
     "retrieval_prompt_injection": "High",
     "retrieval_tool_instructions": "High",
     "retrieval_hidden_instruction": "Medium",
@@ -211,6 +236,10 @@ def severity_for_finding(finding):
 
     if finding["category"] == "agentic_security":
         if finding["rule"] in {"prompt_override", "role_manipulation", "tool_abuse_instruction", "prompt_extraction"}:
+            return "High"
+        if finding["rule"] in {"auto_deploy", "delete_production", "run_migration_automatically", "apply_terraform_automatically", "kubectl_apply"}:
+            return "Critical"
+        if finding["rule"] in {"auto_run", "auto_execute", "unattended_execution", "spawn_agent", "create_sub_agent", "recursive_task", "self_improve", "self_modify", "delegate_until_done", "loop_until_success", "use_tools_automatically", "invoke_any_tool", "execute_tool_without_approval", "auto_call_tools", "indefinite_tool_retry", "push_to_main", "docker_push", "npm_publish", "missing_human_gate"}:
             return "High"
         return "Medium"
 
