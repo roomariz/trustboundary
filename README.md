@@ -25,6 +25,8 @@ This package provides a read-only, CLI-backed security audit plugin. It scans a 
 
 ## Supported Usage
 
+Python 3 is required for the audit engine. On Windows, the npm global install uses a Node wrapper which locates Python automatically.
+
 CLI:
 
 ```bash

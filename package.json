@@ -5,6 +5,7 @@
   "license": "MIT",
   "keywords": ["pi-package", "skills", "security", "audit"],
   "files": [
+    "bin",
     "scripts",
     "commands",
     ".opencode",
@@ -16,7 +17,7 @@
     "VERSION"
   ],
   "bin": {
-    "repo-security-audit": "scripts/run_audit.py"
+    "repo-security-audit": "bin/repo-security-audit.js"
   },
   "pi": {
     "skills": ["./skills"]

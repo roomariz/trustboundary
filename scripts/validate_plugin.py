@@ -22,6 +22,7 @@ REQUIRED_COMMAND_FILES = [
     ROOT / ".codex-plugin" / "commands" / "repo-security-audit.md",
 ]
 REQUIRED_PACKAGE_FILES = [
+    "bin",
     "scripts",
     "commands",
     ".opencode",
@@ -48,7 +49,7 @@ def main() -> int:
     except Exception as exc:
         return fail(f"package.json could not be parsed: {exc}")
 
-    if package_data.get("bin", {}).get("repo-security-audit") != "scripts/run_audit.py":
+    if package_data.get("bin", {}).get("repo-security-audit") != "bin/repo-security-audit.js":
         return fail("package.json is missing the repo-security-audit bin entry")
     if not package_data.get("name") or not package_data.get("version") or "bin" not in package_data or "files" not in package_data:
         return fail("package.json must include name, version, bin, and files")
@@ -61,6 +62,10 @@ def main() -> int:
     run_audit = ROOT / "scripts" / "run_audit.py"
     if not run_audit.exists():
         return fail("scripts/run_audit.py is missing")
+
+    wrapper = ROOT / "bin" / "repo-security-audit.js"
+    if not wrapper.exists():
+        return fail("bin/repo-security-audit.js is missing")
 
     for command_file in REQUIRED_COMMAND_FILES:
         if not command_file.exists():
@@ -85,6 +90,10 @@ def main() -> int:
     readme_text = readme.read_text(encoding="utf-8")
     if "repo-security-audit /path/to/repo" not in readme_text:
         return fail("README.md does not document CLI usage")
+    if "Python 3 is required" not in readme_text:
+        return fail("README.md does not document the Python 3 requirement")
+    if "Node wrapper which locates Python automatically" not in readme_text:
+        return fail("README.md does not document the Windows npm wrapper note")
     if "security-audit-findings.json" not in readme_text or "SECURITY_AUDIT_REPORT.md" not in readme_text:
         return fail("README.md does not document the generated outputs")
 

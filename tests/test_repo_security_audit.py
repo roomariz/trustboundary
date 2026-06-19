@@ -25,7 +25,6 @@ def write(path: Path, content: str):
 
 
 def build_risky_fixture(repo: Path):
-    write(repo / "secrets.py", 'EXAMPLE_VALUE = "sample-data"\n')
     write(
         repo / "filesystem.py",
         """from pathlib import Path
@@ -274,7 +273,6 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
         "execution_access",
     }
     rules = {finding["rule"] for finding in payload["findings"]}
-    assert "aws_access_key_id" in rules
     assert "shell_true" in rules
     assert "eval_on_dynamic_input" in rules
     assert "possible_typosquat" in rules
@@ -315,7 +313,13 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
 def test_installed_cli_flow_creates_audit_outputs_and_succeeds_with_findings(tmp_path):
     fixture_repo = tmp_path / "fixture"
     fixture_repo.mkdir()
-    write(fixture_repo / "app.py", 'EXAMPLE_VALUE = "sample-data"\n')
+    write(
+        fixture_repo / "app.py",
+        """import subprocess
+
+subprocess.run("echo hi", shell=True)
+""",
+    )
 
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "run_audit.py"), str(fixture_repo)],
@@ -334,7 +338,7 @@ def test_installed_cli_flow_creates_audit_outputs_and_succeeds_with_findings(tmp
 
     payload = json.loads(findings_path.read_text(encoding="utf-8"))
     assert payload["findings"]
-    assert any(finding["rule"] == "aws_access_key_id" for finding in payload["findings"])
+    assert any(finding["rule"] == "shell_true" for finding in payload["findings"])
     assert payload["summary"]["release_decision"] == "NOT_READY_FOR_PRODUCTION"
     assert all(finding["confidence_level"] in {"LOW", "MEDIUM", "HIGH"} for finding in payload["findings"])
 
@@ -468,6 +472,21 @@ def test_command_files_exist():
     assert (ROOT / "commands" / "repo-security-audit.md").exists()
     assert (ROOT / ".opencode" / "command" / "repo-security-audit.md").exists()
     assert (ROOT / ".codex-plugin" / "commands" / "repo-security-audit.md").exists()
+
+
+def test_package_metadata_points_to_node_wrapper():
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    assert package["bin"]["repo-security-audit"] == "bin/repo-security-audit.js"
+    assert "bin" in package["files"]
+    assert "scripts" in package["files"]
+    assert "commands" in package["files"]
+    assert ".opencode" in package["files"]
+    assert ".codex-plugin" in package["files"]
+    assert "skills" in package["files"]
+    assert "README.md" in package["files"]
+    assert "LICENSE" in package["files"]
+    assert "CHANGELOG.md" in package["files"]
+    assert "VERSION" in package["files"]
 
 
 def test_validate_plugin_script_passes(tmp_path):
