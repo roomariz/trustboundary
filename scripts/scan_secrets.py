@@ -66,10 +66,10 @@ def redact(s: str) -> str:
         return "*" * len(s)
     return s[:4] + "*" * (len(s) - 8) + s[-4:]
 
-def walk(repo_path: str):
+def walk(repo_path: str, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
     findings = []
     repo_root = None
-    for repo_root, path in iter_repo_files(repo_path):
+    for repo_root, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback):
         if path.name.endswith((".lock",)):
             continue
         scan_file(str(path), findings)

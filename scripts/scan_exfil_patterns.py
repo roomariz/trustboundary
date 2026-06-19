@@ -6,7 +6,7 @@ strings. Read-only; never makes outbound calls itself.
 """
 import sys, os, re, json
 from pathlib import Path
-from scanner_utils import iter_repo_files, relativise
+from scanner_utils import iter_repo_files, relativise, is_env_file
 
 PATTERNS = [
     ("hardcoded_webhook_url", r"https?://[a-zA-Z0-9.\-]*(webhook|hooks\.slack|discord\.com/api/webhooks)[^\s\"'<>]*", 55),
@@ -33,10 +33,12 @@ def scan_file(path, findings):
                     "base_confidence": conf,
                 })
 
-def walk(repo_path):
+def walk(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
     findings = []
     repo_root = None
-    for repo_root, path in iter_repo_files(repo_path):
+    for repo_root, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback):
+        if is_env_file(path) and not include_env_files:
+            continue
         if path.suffix.lower() in (".py", ".js", ".ts", ".sh", ".html"):
             scan_file(str(path), findings)
     if repo_root is not None:

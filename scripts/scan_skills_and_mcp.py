@@ -7,7 +7,7 @@ untrusted plugin / MCP references.
 """
 import sys, os, re, json, fnmatch
 from pathlib import Path
-from scanner_utils import iter_repo_files, relativise
+from scanner_utils import iter_repo_files, relativise, is_env_file
 
 INJECTION_PHRASES = [
     r"ignore (all )?(previous|prior) instructions",
@@ -75,16 +75,20 @@ def scan_config_value(path, findings, label, value):
         for index, item in enumerate(value):
             scan_config_value(path, findings, f"{label}[{index}]", item)
 
-def find_skill_files(repo_path):
+def find_skill_files(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
     out = []
-    for _, path in iter_repo_files(repo_path):
+    for _, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback):
+        if is_env_file(path) and not include_env_files:
+            continue
         if path.name == "SKILL.md":
             out.append(str(path))
     return out
 
-def find_mcp_configs(repo_path):
+def find_mcp_configs(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
     out = []
-    for _, path in iter_repo_files(repo_path):
+    for _, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback):
+        if is_env_file(path) and not include_env_files:
+            continue
         fn = path.name
         root = str(path.parent)
         if fn in ("plugin.json", "package.json") or fnmatch.fnmatch(fn, "mcp*.json") or fn == "mcp.json":
@@ -187,11 +191,11 @@ def scan_mcp_config(path, findings):
     for name, cfg in items:
         scan_config_value(path, findings, str(name), cfg)
 
-def walk(repo_path):
+def walk(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
     findings = []
-    for skill_file in find_skill_files(repo_path):
+    for skill_file in find_skill_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, include_env_files=include_env_files, progress_callback=progress_callback):
         scan_skill_md(skill_file, findings)
-    for mcp_file in find_mcp_configs(repo_path):
+    for mcp_file in find_mcp_configs(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, include_env_files=include_env_files, progress_callback=progress_callback):
         scan_mcp_config(mcp_file, findings)
     repo_root = Path(repo_path).resolve()
     for finding in findings:

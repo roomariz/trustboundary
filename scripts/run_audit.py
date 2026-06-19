@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 import time
 import sys
+from scanner_utils import is_dependency_path, is_test_path
 
 
 ROOT = Path(__file__).resolve().parent
@@ -107,7 +108,7 @@ def emit(message: str, quiet: bool = False):
         print(message)
 
 
-def score_findings(raw_findings):
+def score_findings(raw_findings, include_dependencies: bool = False, include_tests: bool = False):
     score_module = load_module("score")
     scored = []
     counter = 1
@@ -117,6 +118,12 @@ def score_findings(raw_findings):
         metadata = CATEGORY_METADATA.get(finding["category"], {})
         evidence_locations = finding.get("evidence_locations") or [{"file": finding.get("file"), "line": finding.get("line")}]
         evidence_count = finding.get("evidence_count") or len([item for item in evidence_locations if item.get("file")])
+        path = Path(finding.get("file") or "")
+        production_blocker = severity in BLOCKING_SEVERITIES
+        if is_test_path(path) and not include_tests:
+            production_blocker = False
+        if is_dependency_path(path) and not include_dependencies:
+            production_blocker = False
         scored.append({
             "id": f"{finding['category'].upper()}-{counter:04d}",
             "category": finding["category"],
@@ -134,17 +141,18 @@ def score_findings(raw_findings):
             "recommendation": metadata.get("recommendation", "Review the flagged code or configuration and reduce the risky pattern."),
             "remediation_priority": REMEDIATION_PRIORITY.get(severity, "RECOMMENDED"),
             "trust_boundary": metadata.get("trust_boundary", ["unknown"]),
-            "production_blocker": severity in BLOCKING_SEVERITIES,
+            "production_blocker": production_blocker,
             "status": "open",
         })
         counter += 1
     return {"findings": scored, "correlations": score_module.correlate(scored)}
 
 
-def scan_repo(target_repo: Path, quiet: bool = False):
+def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool = False, include_tests: bool = False, include_env_files: bool = False):
     all_findings = []
     audit_warnings = []
     total = len(SCANNER_MODULES)
+    files_checked = 0
     labels = {
         "scan_secrets": "Scanning secrets",
         "scan_dependencies": "Scanning dependencies",
@@ -153,12 +161,26 @@ def scan_repo(target_repo: Path, quiet: bool = False):
         "scan_skills_and_mcp": "Scanning skills, plugins and MCP",
         "scan_frameworks": "Scanning frameworks",
     }
+    def heartbeat(count, _path):
+        nonlocal files_checked
+        files_checked = max(files_checked, count)
+        if count and count % 250 == 0:
+            emit(f"Scanning... {count} files checked", quiet)
     for index, module_name in enumerate(SCANNER_MODULES, start=1):
         scanner = load_module(module_name)
         emit(f"[{index}/{total}] {labels.get(module_name, f'Scanning {module_name}') }...", quiet)
         started = time.perf_counter()
         try:
-            module_findings = scanner.walk(str(target_repo))
+            try:
+                module_findings = scanner.walk(
+                    str(target_repo),
+                    include_tests=include_tests,
+                    include_dependencies=include_dependencies,
+                    include_env_files=include_env_files,
+                    progress_callback=heartbeat,
+                )
+            except TypeError:
+                module_findings = scanner.walk(str(target_repo))
             all_findings.extend(module_findings)
         except Exception as exc:
             audit_warnings.append({
@@ -168,7 +190,7 @@ def scan_repo(target_repo: Path, quiet: bool = False):
             })
         elapsed = time.perf_counter() - started
         emit(f"[{index}/{total}] Done {labels.get(module_name, module_name)}. {elapsed:.1f}s", quiet)
-    return all_findings, audit_warnings
+    return all_findings, audit_warnings, files_checked
 
 
 def risk_counts(findings):
@@ -292,7 +314,7 @@ def format_location(finding):
     return finding["file"] or "-"
 
 
-def render_report(repo_path: Path, scored):
+def render_report(repo_path: Path, scored, scope_summary):
     findings = sorted(scored["findings"], key=severity_sort_key)
     counts = risk_counts(findings)
     decision = release_decision(findings)
@@ -321,6 +343,19 @@ def render_report(repo_path: Path, scored):
     lines = [
         f"# Repo Security Audit - {repo_path.name or repo_path} - {datetime.now().date().isoformat()}",
         "",
+        "## Scan Scope",
+        f"- Target: `{repo_path}`",
+        "- Mode: application source scan",
+        f"- Files scanned: `{scope_summary['files_scanned']}`",
+        f"- Files skipped: `{scope_summary['files_skipped']}`",
+        f"- Excluded directories: `{scope_summary['excluded_dir_count']}`",
+        "",
+        "## Excluded Paths",
+    ]
+    for item in scope_summary["excluded_directories"]:
+        lines.append(f"- `{item}`")
+    lines.extend([
+        "",
         "## Executive Summary",
         f"- Total findings: {len(findings)} (Critical: {counts['Critical']}, High: {counts['High']}, Medium: {counts['Medium']}, Low: {counts['Low']}, Info: {counts['Info']})",
         f"- Overall posture: {posture_label(counts)}",
@@ -328,7 +363,7 @@ def render_report(repo_path: Path, scored):
         "- Network verification pass: skipped (offline scanner only)",
         "",
         "## Trust Boundary Profile",
-    ]
+    ])
     for key in ["filesystem_access", "network_access", "environment_access", "execution_access"]:
         item = trust_profile[key]
         lines.append(
@@ -389,8 +424,10 @@ def render_report(repo_path: Path, scored):
         "## Required Fixes",
     ])
     if required:
-        for finding in required:
+        for finding in required[:10]:
             lines.append(f"- {finding['id']} ({finding['severity']}) {finding['rule']} - {finding.get('recommendation')}")
+        if len(required) > 10:
+            lines.append(f"- ... and {len(required) - 10} more in JSON")
     else:
         lines.append("No required fixes identified.")
 
@@ -405,45 +442,10 @@ def render_report(repo_path: Path, scored):
         lines.append("No recommended fixes identified.")
 
     lines.extend([
-        "## Findings Table",
-        "| ID | Severity | Confidence | Evidence Count | Location(s) | Trust Boundary | Production Blocker | Rule | Impact | Recommendation | Evidence |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "",
+        "## Findings",
+        "Full finding details are available in `security-audit-findings.json`.",
     ])
-    for finding in findings:
-        trust_boundary = ", ".join(finding.get("trust_boundary") or ["unknown"])
-        evidence_locations = ", ".join(
-            f"{item.get('file') or '-'}:{item.get('line') or '-'}" for item in finding.get("evidence_locations") or []
-        ) or "-"
-        lines.append(
-            f"| {finding['id']} | {finding['severity']} | {finding.get('confidence_level') or finding['confidence_bucket']} | {finding.get('evidence_count') or 0} | {evidence_locations} | {trust_boundary} | {str(bool(finding.get('production_blocker'))).lower()} | {finding['rule']} | {finding.get('impact') or '-'} | {finding.get('recommendation') or '-'} | {finding.get('evidence_redacted') or '-'} |"
-        )
-
-    lines.extend(["", "## Detailed Findings"])
-    for category, title in category_titles.items():
-        items = by_category.get(category, [])
-        lines.append(f"### {title}")
-        if not items:
-            lines.append("No findings in this category.")
-        for finding in items:
-            evidence_locations = ", ".join(
-                f"{item.get('file') or '-'}:{item.get('line') or '-'}" for item in finding.get("evidence_locations") or []
-            ) or "-"
-            lines.extend([
-                f"- **{finding['id']}**",
-                f"  - File: `{finding.get('file') or '-'}`",
-                f"  - Line: `{finding.get('line') or '-'}`",
-                f"  - Rule ID: `{finding['rule']}`",
-                f"  - Severity: `{finding['severity']}`",
-                f"  - Confidence: `{finding.get('confidence_level') or finding['confidence_bucket']}`",
-                f"  - Evidence count: `{finding.get('evidence_count') or 0}`",
-                f"  - Evidence locations: `{evidence_locations}`",
-                f"  - Trust boundary: `{', '.join(finding.get('trust_boundary') or ['unknown'])}`",
-                f"  - Production blocker: `{str(bool(finding.get('production_blocker'))).lower()}`",
-                f"  - Remediation priority: `{finding.get('remediation_priority') or 'RECOMMENDED'}`",
-                f"  - Impact: {finding.get('impact') or '-'}",
-                f"  - Recommendation: {finding.get('recommendation') or '-'}",
-                f"  - Evidence: `{finding.get('evidence_redacted') or '-'}`",
-            ])
 
     lines.extend([
         "",
@@ -471,7 +473,7 @@ def render_audit_warnings(warnings):
     return "\n".join(lines) + "\n"
 
 
-def build_json_output(repo_path: Path, scored):
+def build_json_output(repo_path: Path, scored, scope_summary):
     findings = list(scored["findings"])
     counts = risk_counts(findings)
     decision = release_decision(findings)
@@ -489,6 +491,7 @@ def build_json_output(repo_path: Path, scored):
             "release_decision": decision,
             "production_blockers": sum(1 for finding in findings if finding.get("production_blocker")),
         },
+        "scope": scope_summary,
         "trust_boundary": boundary_summary(findings),
         "attack_surface": attack_surface_summary(findings),
         "trust_paths": trust_paths(findings),
@@ -513,6 +516,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", nargs="?", default=".")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--include-dependencies", action="store_true")
+    parser.add_argument("--include-tests", action="store_true")
+    parser.add_argument("--include-env-files", action="store_true")
     args = parser.parse_args(argv)
 
     target_repo = Path(args.repo).resolve()
@@ -524,18 +530,28 @@ def main(argv=None):
         started = time.perf_counter()
         emit("Repository Trust Boundary Auditor", args.quiet)
         emit(f"Target: {target_repo}", args.quiet)
-        raw_findings, audit_warnings = scan_repo(target_repo, args.quiet)
+        excluded_directories = [".git", "node_modules", "dist", "build", ".venv", "venv", "env", ".tox", ".mypy_cache", ".pytest_cache", "__pycache__", "coverage", ".next", "out", "target", "vendor", "site-packages", ".venv-windows"]
+        emit("Mode: application source scan", args.quiet)
+        emit(f"Excluded directories: {len(excluded_directories)}", args.quiet)
+        emit("Scanning source files...", args.quiet)
+        raw_findings, audit_warnings, files_checked = scan_repo(target_repo, args.quiet, args.include_dependencies, args.include_tests, args.include_env_files)
         emit("Scoring findings...", args.quiet)
-        scored = score_findings(raw_findings)
+        scored = score_findings(raw_findings, args.include_dependencies, args.include_tests)
+        scope_summary = {
+            "files_scanned": files_checked,
+            "files_skipped": max(0, files_checked - len(raw_findings)),
+            "excluded_dir_count": len(excluded_directories),
+            "excluded_directories": excluded_directories,
+        }
         findings_path = Path.cwd() / "security-audit-findings.json"
         report_path = Path.cwd() / "SECURITY_AUDIT_REPORT.md"
         emit("Generating reports...", args.quiet)
-        json_output = build_json_output(target_repo, scored)
+        json_output = build_json_output(target_repo, scored, scope_summary)
         if audit_warnings:
             json_output["audit_warnings"] = audit_warnings
             json_output["summary"]["scanner_failures"] = len(audit_warnings)
         findings_path.write_text(json.dumps(json_output, indent=2), encoding="utf-8")
-        report = render_report(target_repo, scored)
+        report = render_report(target_repo, scored, scope_summary)
         warnings_block = render_audit_warnings(audit_warnings)
         if warnings_block:
             report += "\n" + warnings_block
@@ -543,6 +559,8 @@ def main(argv=None):
         emit("")
         emit("Done.", args.quiet)
         emit(f"Total elapsed: {time.perf_counter() - started:.1f}s", args.quiet)
+        emit(f"Files scanned: {scope_summary['files_scanned']}", args.quiet)
+        emit(f"Files skipped: {scope_summary['files_skipped']}", args.quiet)
         emit(f"Release Decision: {release_decision(scored['findings'])}", args.quiet)
         emit(f"Findings: {len(scored['findings'])}", args.quiet)
         if audit_warnings:

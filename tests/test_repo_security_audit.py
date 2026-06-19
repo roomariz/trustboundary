@@ -327,8 +327,9 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
     assert "Recommended Fixes" in report
     assert "Attack Surface Summary" in report
     assert "Trust Paths" in report
-    assert "Findings Table" in report
-    assert "Detailed Findings" in report
+    assert "Scan Scope" in report
+    assert "Excluded Paths" in report
+    assert "Full finding details are available in `security-audit-findings.json`." in report
     assert "Limitations of Regex/Static Scanning" in report
 
 
@@ -369,7 +370,7 @@ subprocess.run("echo hi", shell=True)
     assert "Trust Boundary Profile" in report
     assert "Risk Counts by Severity" in report
     assert "Production Readiness Assessment" in report
-    assert "Findings Table" in report
+    assert "Scan Scope" in report
     assert "Limitations" in report
 
 
@@ -490,6 +491,93 @@ def test_audit_skips_large_binary_and_non_repo_paths(tmp_path):
     assert all(".git" not in finding["file"] for finding in payload["findings"])
 
 
+def test_default_exclusions_skip_venv_windows_and_site_packages(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write(repo / ".venv-windows" / "Lib" / "site-packages" / "bad.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+    write(repo / "site-packages" / "bad2.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    files = {finding["file"] for finding in payload["findings"]}
+    assert all(".venv-windows" not in file for file in files)
+    assert all("site-packages" not in file for file in files)
+    assert any(file == "app.py" for file in files)
+
+
+def test_env_files_are_scanned_for_secrets_only(tmp_path):
+    repo = tmp_path / "env-only"
+    repo.mkdir()
+    aws_key = "AKIA" + "1234567890ABCDEF"
+    write(repo / ".env", f'API_KEY="{aws_key}"\n')
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    rules = {finding["rule"] for finding in payload["findings"]}
+    assert "aws_access_key_id" in rules
+    assert "shell_true" not in rules
+    assert "unsafe_prompt_construction" not in rules
+
+
+def test_vendor_findings_do_not_create_production_blockers_by_default(tmp_path):
+    repo = tmp_path / "vendor"
+    repo.mkdir()
+    write(repo / "vendor" / "pkg" / "package.json", json.dumps({"scripts": {"postinstall": "echo hi"}}))
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert all("vendor" not in finding["file"] for finding in payload["findings"])
+    assert payload["summary"]["production_blockers"] == 0
+
+
+def test_include_dependencies_includes_dependency_paths(tmp_path):
+    repo = tmp_path / "deps"
+    repo.mkdir()
+    write(repo / "node_modules" / "pkg" / "package.json", json.dumps({"scripts": {"postinstall": "echo hi"}}))
+
+    result = run_audit_cli(repo, tmp_path, "--include-dependencies")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert any("node_modules" in finding["file"] for finding in payload["findings"])
+
+
+def test_progress_output_includes_files_scanned_and_skipped(tmp_path):
+    repo = tmp_path / "progress"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    result = run_audit_cli(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "Files scanned:" in result.stdout
+    assert "Files skipped:" in result.stdout
+
+
+def test_markdown_limits_required_fixes_to_top_10(tmp_path):
+    repo = tmp_path / "many"
+    repo.mkdir()
+    for index in range(12):
+        write(repo / f"file{index}.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    required_section = report.split("## Required Fixes", 1)[1].split("## Recommended Fixes", 1)[0]
+    required_lines = [line for line in required_section.splitlines() if line.startswith("- UNSAFE_EXECUTION")]
+    assert len(required_lines) <= 10
+    assert "more in JSON" in required_section
+
+
 def test_command_files_exist():
     assert (ROOT / "commands" / "repo-security-audit.md").exists()
     assert (ROOT / ".opencode" / "command" / "repo-security-audit.md").exists()
@@ -602,8 +690,7 @@ def test_run_audit_continues_when_one_scanner_raises(tmp_path, monkeypatch):
     payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
     assert payload["audit_warnings"]
     assert payload["summary"]["scanner_failures"] == 1
-    assert payload["audit_warnings"][0]["rule"] == "scanner_failed"
-    assert payload["audit_warnings"][0]["scanner"] == "scan_dependencies"
+    assert any(warning["scanner"] == "scan_dependencies" for warning in payload["audit_warnings"])
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
     assert "Audit Warnings" in report
     assert "scanner_failed" in report

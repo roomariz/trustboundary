@@ -9,7 +9,7 @@ is a separate, human-approved step (see SKILL.md step 3).
 """
 import sys, os, json, re
 from pathlib import Path
-from scanner_utils import iter_repo_files, relativise
+from scanner_utils import iter_repo_files, relativise, is_env_file
 
 MANIFESTS = ["package.json", "requirements.txt", "pyproject.toml", "go.mod", "Cargo.toml"]
 POPULAR_NPM = ["react", "lodash", "express", "axios", "chalk", "request", "commander"]
@@ -92,10 +92,12 @@ def scan_requirements_txt(path, findings):
                 "base_confidence": 45,
             })
 
-def walk(repo_path):
+def walk(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
     findings = []
     repo_root = None
-    for repo_root, path in iter_repo_files(repo_path):
+    for repo_root, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback):
+        if is_env_file(path) and not include_env_files:
+            continue
         full = str(path)
         if path.name == "package.json":
             scan_package_json(full, findings)

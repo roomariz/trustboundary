@@ -10,7 +10,7 @@ import re
 import sys
 from pathlib import Path
 
-from scanner_utils import iter_repo_files, relativise, is_text_scan_target
+from scanner_utils import iter_repo_files, relativise, is_text_scan_target, is_env_file
 
 
 def scan_file(path, findings):
@@ -139,10 +139,12 @@ def scan_file(path, findings):
             })
 
 
-def walk(repo_path):
+def walk(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None):
     findings = []
     repo_root = None
-    for repo_root, path in iter_repo_files(repo_path):
+    for repo_root, path in iter_repo_files(repo_path, include_tests=include_tests, include_dependencies=include_dependencies, progress_callback=progress_callback):
+        if is_env_file(path) and not include_env_files:
+            continue
         if is_text_scan_target(path):
             scan_file(str(path), findings)
     if repo_root is not None:
