@@ -1441,6 +1441,7 @@ def production_readiness(findings, trust_paths_items, attack_chains_items, activ
 
 
 def top_risks(findings, repo_config=None):
+    findings = [normalize_emitted_finding(finding) for finding in findings]
     eligible = [
         finding
         for finding in findings
@@ -2584,7 +2585,58 @@ def _attack_path_category(finding):
     return mapping.get(category)
 
 
+def _secret_material_is_direct(finding):
+    if finding.get("severity") != "Critical":
+        return False
+    if finding.get("category") not in {"leaked_secrets", "secret_leakage"}:
+        return False
+    evidence = (finding.get("evidence_redacted") or finding.get("evidence") or finding.get("observed_evidence") or "").lower()
+    secret_value = str(finding.get("secret") or finding.get("match") or finding.get("secret_value") or "").lower()
+    if not evidence and not secret_value:
+        return False
+    redacted_markers = ("redacted", "example", "sample", "placeholder", "scanner source", "detector", "regex", "pattern")
+    if any(marker in evidence for marker in redacted_markers):
+        return False
+    if any(marker in secret_value for marker in redacted_markers):
+        return False
+    return True
+
+
+def _emission_confidence_band(finding):
+    return (finding.get("confidence_band") or finding.get("confidence_level") or "").upper()
+
+
+def _satisfies_confirmed_invariant(finding):
+    if finding.get("finding_class") != "confirmed_vulnerability":
+        return False
+    if _secret_material_is_direct(finding):
+        return True
+    if _emission_confidence_band(finding) != "HIGH" and int(finding.get("confidence_score") or 0) < 80:
+        return False
+    return all([
+        finding.get("source"),
+        finding.get("sink"),
+        finding.get("flow_path"),
+        finding.get("missing_evidence"),
+        finding.get("impact"),
+    ])
+
+
+def normalize_emitted_finding(finding):
+    normalized = dict(finding)
+    has_path = bool(normalized.get("source") or normalized.get("sink") or normalized.get("flow_path"))
+    if normalized.get("finding_class") == "confirmed_vulnerability" and not _satisfies_confirmed_invariant(normalized):
+        normalized["finding_class"] = "potential_risk" if has_path else "observed_capability"
+        if normalized.get("evidence_level") == "proven":
+            normalized["evidence_level"] = "partial" if has_path else "capability"
+        if normalized.get("proof_status") == "explicit" and normalized["finding_class"] != "confirmed_vulnerability":
+            normalized["proof_status"] = "implicit" if has_path else "capability"
+        normalized["production_blocker"] = False
+    return normalized
+
+
 def attack_paths(findings, trust_paths_items=None, trust_boundary_graph=None, auth_review=None, tenant_review=None):
+    findings = [normalize_emitted_finding(finding) for finding in findings]
     trust_paths_items = list(trust_paths_items or trust_paths(findings))
     trust_boundary_graph = trust_boundary_graph or build_trust_boundary_graph(findings, trust_paths_items)
     auth_review = auth_review or auth_review_summary(findings)
@@ -2704,7 +2756,8 @@ def external_assessment_incomplete(external_summary) -> bool:
 
 
 def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None, external_summary=None, explain: bool = False):
-    findings = sorted(scored["findings"], key=severity_sort_key)
+    findings = [normalize_emitted_finding(finding) for finding in scored["findings"]]
+    findings = sorted(findings, key=severity_sort_key)
     unsuppressed_findings = list(findings)
     findings, active_suppressions, expired_suppressions, ignored_findings = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
     risk_state = risk_acceptance_state(findings, getattr(repo_config, "risk_acceptance", ()))
@@ -3173,7 +3226,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     medium = [f for f in findings if f["severity"] == "Medium"][:10]
     low = [f for f in findings if f["severity"] == "Low"]
     for finding in high_critical + medium:
-        lines.append(f"- {finding['id']} | {finding['rule_id']} | {finding['severity']} | {finding['confidence_level']} | {finding.get('occurrences', 1)} occurrence(s)")
+        lines.append(f"- {finding['id']} | {finding.get('rule_id') or finding.get('rule') or '-'} | {finding['severity']} | {finding['confidence_level']} | {finding.get('occurrences', 1)} occurrence(s)")
     if low:
         lines.append(f"- Low findings: {len(low)} total, summarized in JSON")
 
@@ -3334,7 +3387,7 @@ def render_audit_trail(audit_trail):
 
 
 def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None, external_summary=None):
-    findings = list(scored["findings"])
+    findings = [normalize_emitted_finding(finding) for finding in scored["findings"]]
     unsuppressed_findings = list(findings)
     findings, active_suppressions, expired_suppressions, ignored_findings = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
     risk_state = risk_acceptance_state(findings, getattr(repo_config, "risk_acceptance", ()))
@@ -3459,6 +3512,7 @@ def _sarif_level(severity: str) -> str:
 
 
 def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: bool = False, external_summary=None, readiness=None):
+    findings = [normalize_emitted_finding(finding) for finding in findings]
     def _rule_sort_key(rule):
         return (
             rule.get("fullDescription", {}).get("text", ""),

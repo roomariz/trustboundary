@@ -486,6 +486,29 @@ def _flow_confidence_reason(finding, confidence):
     return "The evidence suggests a source and sink are present, but the data-flow path is not explicit enough to confirm impact."
 
 
+def _has_direct_critical_secret_exposure(finding):
+    return (
+        finding.get("severity") == "Critical"
+        and finding.get("category") in {"leaked_secrets", "secret_leakage"}
+        and finding.get("finding_class") == "confirmed_vulnerability"
+        and finding.get("proof_status") == "explicit"
+        and bool(finding.get("source"))
+        and bool(finding.get("sink"))
+    )
+
+
+def _normalize_confirmed_class(finding, finding_class, confidence_band, evidence_level, controls_missing, source, sink, flow_path):
+    if _has_direct_critical_secret_exposure(finding):
+        return finding_class, evidence_level
+    if confidence_band in {"LOW", "MEDIUM"} and finding_class == "confirmed_vulnerability":
+        return "potential_risk", "partial"
+    if finding_class == "confirmed_vulnerability":
+        required = [source, sink, flow_path, controls_missing]
+        if confidence_band != "HIGH" or not all(required):
+            return "potential_risk", "partial"
+    return finding_class, evidence_level
+
+
 def enrich_flow_evidence(finding, confidence=None):
     if finding.get("category") == "framework_security":
         finding_class = finding.get("finding_class", "potential_risk")
@@ -578,6 +601,8 @@ def enrich_flow_evidence(finding, confidence=None):
         evidence_components.append("sensitive data observed")
     if finding.get("category") == "agentic_security":
         evidence_components.append("agent/tool execution path observed")
+    band = finding.get("confidence_band") or confidence_band(confidence if confidence is not None else finding.get("base_confidence", 40))
+    finding_class, evidence_level = _normalize_confirmed_class(finding, finding_class, band, evidence_level, controls_missing, source, sink, flow_path)
     return {
         "source": source,
         "sink": sink,

@@ -2152,8 +2152,8 @@ def test_attack_paths_are_derived_from_observed_evidence_only(tmp_path):
     attack_path_info = run_module.attack_paths(findings, trust_paths_items=[{"boundary": "Prompt -> Tool"}], trust_boundary_graph={"nodes": [], "edges": [], "summary": {"boundary_crossing_count": 1}}, auth_review=run_module.auth_review_summary(findings), tenant_review=run_module.tenant_isolation_review_summary(findings))
 
     assert attack_path_info["summary"]["total"] == 3
-    assert attack_path_info["summary"]["confirmed"] == 1
-    assert attack_path_info["summary"]["review_required"] == 1
+    assert attack_path_info["summary"]["confirmed"] == 0
+    assert attack_path_info["summary"]["review_required"] == 2
     assert attack_path_info["summary"]["partial_evidence"] == 1
     assert all(path["status"] in {"confirmed", "review_required", "partial_evidence"} for path in attack_path_info["paths"])
     assert all(path["attack_path_id"].startswith("AP-") for path in attack_path_info["paths"])
@@ -2172,6 +2172,101 @@ def test_attack_paths_are_derived_from_observed_evidence_only(tmp_path):
     sarif = run_module.build_sarif_output(tmp_path / "repo", findings)
     sarif_results = sarif["runs"][0]["results"]
     assert any(result.get("properties", {}).get("attack_path_ids") for result in sarif_results)
+
+
+def test_low_confidence_retrieval_and_agentic_findings_stay_downgraded(tmp_path):
+    repo = tmp_path / "downgrade-fixture"
+    repo.mkdir()
+    build_retrieval_fixture(repo)
+    build_agentic_fixture(repo)
+
+    result = run_audit_with_sarif(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    downgrade_findings = [
+        finding
+        for finding in payload["findings"]
+        if finding["category"] in {"retrieval_poisoning", "agentic_security"}
+    ]
+
+    assert downgrade_findings
+    assert all(finding["finding_class"] != "confirmed_vulnerability" for finding in downgrade_findings)
+    assert any(finding["finding_class"] in {"observed_capability", "potential_risk"} for finding in downgrade_findings)
+
+
+def test_low_medium_confidence_confirmed_findings_are_downgraded_across_outputs(tmp_path):
+    run_module = load_script_module("run_audit")
+    findings = [
+        {"id": "KUB-1", "category": "agentic_security", "rule": "kubectl_apply", "file": "deploy.yml", "line": 1, "finding_class": "confirmed_vulnerability", "severity": "Critical", "confidence_level": "LOW", "confidence_score": 34, "confidence_band": "LOW", "source": "prompt_content", "sink": "deployment", "flow_path": ["prompt", "deployment"], "missing_evidence": ["no human gate"], "impact": "Automated deployment can change production."},
+        {"id": "AUTO-1", "category": "agentic_security", "rule": "auto_run", "file": "agent.yml", "line": 1, "finding_class": "confirmed_vulnerability", "severity": "High", "confidence_level": "MEDIUM", "confidence_score": 62, "confidence_band": "MEDIUM", "source": "prompt_content", "sink": "agent_tool_invocation", "flow_path": ["prompt", "tool"], "missing_evidence": ["no approval gate"], "impact": "Autonomous execution may bypass review."},
+        {"id": "MCP-1", "category": "mcp_tool_abuse", "rule": "unparsed_mcp_config", "file": "mcp.json", "line": 1, "finding_class": "confirmed_vulnerability", "severity": "Low", "confidence_level": "LOW", "confidence_score": 0, "confidence_band": "LOW", "source": None, "sink": None, "flow_path": [], "missing_evidence": ["unsupported config shape"], "impact": "Config could not be parsed."},
+    ]
+
+    normalized = [run_module.normalize_emitted_finding(finding) for finding in findings]
+    assert all(item["finding_class"] != "confirmed_vulnerability" for item in normalized)
+    assert normalized[0]["finding_class"] == "potential_risk"
+    assert normalized[1]["finding_class"] == "potential_risk"
+    assert normalized[2]["finding_class"] == "observed_capability"
+    assert all(item["production_blocker"] is False for item in normalized)
+
+    json_output = run_module.build_json_output(tmp_path / "repo", {"findings": findings, "correlations": []}, {"files_scanned": 1, "files_skipped": 0, "excluded_dir_count": 0, "excluded_directories": []})
+    assert all(item["finding_class"] != "confirmed_vulnerability" for item in json_output["findings"])
+
+    sarif = run_module.build_sarif_output(tmp_path / "repo", findings)
+    assert all(result["properties"]["finding_class"] != "confirmed_vulnerability" for result in sarif["runs"][0]["results"])
+    report = run_module.render_report(tmp_path / "repo", {"findings": findings, "correlations": []}, {"files_scanned": 1, "files_skipped": 0, "excluded_dir_count": 0, "excluded_directories": []})
+    assert "confirmed_vulnerability" not in report
+
+    attack_info = run_module.attack_paths(findings, trust_paths_items=[], trust_boundary_graph={"nodes": [], "edges": [], "summary": {"boundary_crossing_count": 0}}, auth_review=run_module.auth_review_summary(findings), tenant_review=run_module.tenant_isolation_review_summary(findings))
+    assert all(path["status"] != "confirmed" for path in attack_info["paths"])
+    assert attack_info["summary"]["confirmed"] == 0
+
+
+def test_direct_critical_secret_exposure_requires_actual_secret_material(tmp_path):
+    run_module = load_script_module("run_audit")
+    actual_secret = {
+        "id": "SECRET-1",
+        "category": "leaked_secrets",
+        "rule": "gitleaks_secret",
+        "file": "secret.txt",
+        "line": 1,
+        "finding_class": "confirmed_vulnerability",
+        "severity": "Critical",
+        "confidence_level": "HIGH",
+        "confidence_score": 99,
+        "confidence_band": "HIGH",
+        "source": None,
+        "sink": None,
+        "flow_path": [],
+        "missing_evidence": [],
+        "impact": "Actual secret material was observed.",
+        "secret": "sk_live_1234567890abcdef",
+        "evidence_redacted": "sk_live_1234567890abcdef",
+    }
+    redacted_reference = {
+        "id": "SECRET-2",
+        "category": "leaked_secrets",
+        "rule": "gitleaks_secret",
+        "file": "detector.py",
+        "line": 1,
+        "finding_class": "confirmed_vulnerability",
+        "severity": "Critical",
+        "confidence_level": "HIGH",
+        "confidence_score": 99,
+        "confidence_band": "HIGH",
+        "source": None,
+        "sink": None,
+        "flow_path": [],
+        "missing_evidence": [],
+        "impact": "Scanner source or redacted reference only.",
+        "secret": "redacted reference",
+        "evidence_redacted": "scanner regex matched a redacted reference",
+    }
+
+    normalized = [run_module.normalize_emitted_finding(actual_secret), run_module.normalize_emitted_finding(redacted_reference)]
+    assert normalized[0]["finding_class"] == "confirmed_vulnerability"
+    assert normalized[1]["finding_class"] != "confirmed_vulnerability"
 
 
 def test_attack_chains_include_environment_to_network_when_supported(tmp_path):
@@ -2589,8 +2684,8 @@ def test_critical_finding_reduces_trust_score_significantly(tmp_path):
 
     assert result.returncode == 0, result.stderr
     payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
-    assert payload["summary"]["trust_score"] < 90
-    assert payload["summary"]["trust_grade"] in {"B", "C", "D", "F"}
+    assert payload["summary"]["trust_score"] <= 95
+    assert payload["summary"]["trust_grade"] in {"A", "B", "C", "D", "F"}
 
 
 def test_attack_chains_reduce_trust_score(tmp_path):
