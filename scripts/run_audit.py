@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 import time
 import sys
-from scanner_utils import is_dependency_path, is_test_path, load_ignore_patterns, load_trustboundary_config, path_scope_tags
+from scanner_utils import load_ignore_patterns, load_trustboundary_config, path_scope_tags
 
 
 ROOT = Path(__file__).resolve().parent
@@ -181,6 +181,8 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             production_blocker = False
         findings.append({
             **finding,
+            "scope": scope_tags[0],
+            "scope_tags": list(scope_tags),
             "impact": metadata.get("impact", "Review the finding and validate whether it is a real risk."),
             "recommendation": RULE_RECOMMENDATIONS.get(finding["rule"], metadata.get("recommendation", "Review the flagged code or configuration and reduce the risky pattern.")),
             "remediation_priority": REMEDIATION_PRIORITY.get(finding["severity"], "RECOMMENDED"),
@@ -213,6 +215,7 @@ def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool
             continue
         emit(f"[{index}/{total}] {labels.get(module_name, f'Scanning {module_name}') }...", quiet)
         started = time.perf_counter()
+        scanner_failed = False
         try:
             scanner = load_module(module_name)
             try:
@@ -228,13 +231,20 @@ def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool
                 module_findings = scanner.walk(str(target_repo))
             all_findings.extend(module_findings)
         except Exception as exc:
+            scanner_failed = True
             audit_warnings.append({
                 "rule": "scanner_failed",
                 "scanner": module_name,
                 "message": str(exc),
             })
         elapsed = time.perf_counter() - started
-        log_line(f"{labels.get(module_name, module_name)} completed in {elapsed:.1f}s", kind="success", quiet=quiet, colour_enabled=colour_enabled, use_icons=use_icons)
+        log_line(
+            f"{labels.get(module_name, module_name)} completed in {elapsed:.1f}s",
+            kind="warning" if scanner_failed else "success",
+            quiet=quiet,
+            colour_enabled=colour_enabled,
+            use_icons=use_icons,
+        )
     return all_findings, audit_warnings, files_checked
 
 
@@ -632,7 +642,7 @@ def main(argv=None):
             args.include_env_files,
             colour_enabled=colour_enabled,
             use_icons=use_icons,
-            ignore_patterns=ignore_patterns + tuple(repo_config.exclusions),
+            ignore_patterns=ignore_patterns + tuple(repo_config.exclusions) + tuple(repo_config.ignore_patterns),
             config=repo_config,
         )
         emit("Scoring findings...", args.quiet)

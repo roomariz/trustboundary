@@ -282,6 +282,17 @@ client = OpenAI()
     )
 
 
+def build_scope_fixture(repo: Path):
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+    write(repo / "tests" / "test_app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+    write(repo / "generated" / "client.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+    write(repo / "docs" / "README.md", "This mentions subprocess.run(shell=True) as reference text.\n")
+    write(
+        repo / "node_modules" / "pkg" / "package.json",
+        json.dumps({"scripts": {"postinstall": "echo hi"}}),
+    )
+
+
 def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
     repo = tmp_path / "target"
     repo.mkdir()
@@ -742,6 +753,31 @@ This framework note mentions prompt injection, tenant isolation, and model guida
     assert "README.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
     assert "production-hardening.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
     assert "AE.CAP.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
+
+
+def test_scope_classification_is_reflected_in_reports_and_summary(tmp_path):
+    repo = tmp_path / "scope"
+    repo.mkdir()
+    build_scope_fixture(repo)
+
+    result = run_audit_cli(repo, tmp_path, "--include-tests", "--include-dependencies")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    scope_counts = payload["summary"]["scope_counts"]
+    assert scope_counts["production"] >= 1
+    assert scope_counts["test"] >= 1
+    assert scope_counts["generated"] >= 1
+    assert scope_counts["dependency"] >= 1
+    assert scope_counts["documentation"] >= 1
+
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "## Scope Breakdown" in report
+    assert "- Production:" in report
+    assert "- Test:" in report
+    assert "- Dependency:" in report
+    assert "- Generated:" in report
+    assert "- Documentation:" in report
 
 
 def test_print_logging_is_not_prompt_injection(tmp_path):
