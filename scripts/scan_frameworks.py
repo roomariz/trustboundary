@@ -13,6 +13,19 @@ from pathlib import Path
 from scanner_utils import iter_repo_files, relativise, is_text_scan_target, is_env_file
 
 
+AUTH_DECORATOR_PATTERNS = r"(Depends\(|oauth2|require_auth|auth|role|admin_required|permission|tenant|owner)"
+PUBLIC_MARKERS = r"(?i)\b(public|anonymous|open)\b"
+ADMIN_MARKERS = r"(?i)\badmin\b"
+OBJECT_ACCESS_PATTERNS = re.compile(r"(?i)\b(find|get|load|fetch|query|select|lookup)\b.*\b(id|uuid|pk|slug)\b|(\.get\(\s*.*id|find_by_id|where\(.*id)")
+
+
+def _line_number(text: str, needle: str):
+    index = text.find(needle)
+    if index < 0:
+        return None
+    return text.count("\n", 0, index) + 1
+
+
 def scan_file(path, findings):
     try:
         text = Path(path).read_text(encoding="utf-8", errors="ignore")
@@ -21,30 +34,163 @@ def scan_file(path, findings):
 
     lower = text.lower()
 
+    route_lines = []
+    for match in re.finditer(r"@app\.(get|post|put|patch|delete)\(([^)]*)\)", text):
+        route_lines.append((match.group(1).upper(), match.group(2), _line_number(text, match.group(0)) or 1, match.group(0)))
+
     if "fastapi" in lower:
-        route_match = re.search(r"@app\.(get|post|put|patch|delete)\(", text)
-        has_auth_guard = re.search(r"(Depends\(|oauth2|require_auth|auth|role|admin_required)", text, re.IGNORECASE)
-        if route_match and not has_auth_guard:
-            findings.append({
-                "category": "framework_security",
-                "framework": "FastAPI",
-                "rule": "unauthenticated_route",
-                "file": path,
-                "line": None,
-                "evidence_redacted": "FastAPI route without obvious auth dependency",
-                "base_confidence": 70,
-            })
-        if re.search(r"@app\.(get|post|put|patch|delete)\(.*admin", text, re.IGNORECASE) and not has_auth_guard:
-            findings.append({
-                "category": "framework_security",
-                "framework": "FastAPI",
-                "rule": "unrestricted_admin_endpoint",
-                "file": path,
-                "line": None,
-                "evidence_redacted": "Admin-style route without dependency-based auth",
-                "base_confidence": 75,
-            })
-        if route_match and re.search(r"(prompt|system_prompt)\s*=\s*f?[\"'][^\"']*\{(?:user_input|input|message|content|query)\}", text, re.IGNORECASE) and not re.search(r"(validate|sanitize|delimiter|triple backticks|allowlist)", lower):
+        has_auth_guard = re.search(AUTH_DECORATOR_PATTERNS, text, re.IGNORECASE)
+        for method, args, line, snippet in route_lines:
+            is_public = re.search(PUBLIC_MARKERS, args, re.IGNORECASE) is not None
+            is_admin = re.search(ADMIN_MARKERS, args, re.IGNORECASE) is not None
+            route_hint = snippet
+            route_name = args.strip() or snippet
+            if is_public:
+                findings.append({
+                    "category": "framework_security",
+                    "framework": "FastAPI",
+                    "rule": "public_route_marked_public",
+                    "file": path,
+                    "line": line,
+                    "http_method": method,
+                    "route_or_handler": route_name,
+                    "auth_evidence": "public marker on route",
+                    "authorization_evidence": "explicit public designation",
+                    "role_check_evidence": None,
+                    "ownership_check_evidence": None,
+                    "tenant_check_evidence": None,
+                    "object_access_evidence": None,
+                    "missing_evidence": None,
+                    "proof_status": "explicit",
+                    "finding_class": "observed_capability",
+                    "evidence_level": "capability",
+                    "confidence_reason": "The route is explicitly marked public.",
+                    "boundary_crossing": False,
+                    "evidence_redacted": f"Public route: {route_hint}",
+                    "base_confidence": 90,
+                })
+                continue
+            if has_auth_guard:
+                findings.append({
+                    "category": "framework_security",
+                    "framework": "FastAPI",
+                    "rule": "route_with_auth_middleware",
+                    "file": path,
+                    "line": line,
+                    "http_method": method,
+                    "route_or_handler": route_name,
+                    "auth_evidence": "auth middleware or dependency",
+                    "authorization_evidence": None,
+                    "role_check_evidence": None,
+                    "ownership_check_evidence": None,
+                    "tenant_check_evidence": None,
+                    "object_access_evidence": None,
+                    "missing_evidence": None,
+                    "proof_status": "explicit",
+                    "finding_class": "observed_capability",
+                    "evidence_level": "capability",
+                    "confidence_reason": "Auth middleware or dependency evidence is visible on the route.",
+                    "boundary_crossing": False,
+                    "evidence_redacted": "FastAPI route with auth dependency",
+                    "base_confidence": 80,
+                })
+                if is_admin and re.search(r"(require_admin|role|permission)", text, re.IGNORECASE):
+                    findings.append({
+                        "category": "framework_security",
+                        "framework": "FastAPI",
+                        "rule": "route_with_role_check",
+                        "file": path,
+                        "line": line,
+                        "http_method": method,
+                        "route_or_handler": route_name,
+                        "auth_evidence": "auth middleware or dependency",
+                        "authorization_evidence": "role or permission dependency",
+                        "role_check_evidence": "role or permission dependency",
+                        "ownership_check_evidence": None,
+                        "tenant_check_evidence": None,
+                        "object_access_evidence": None,
+                        "missing_evidence": None,
+                        "proof_status": "explicit",
+                        "finding_class": "observed_capability",
+                        "evidence_level": "capability",
+                        "confidence_reason": "Role or permission evidence is visible on the admin route.",
+                        "boundary_crossing": False,
+                        "evidence_redacted": "Admin route with role check",
+                        "base_confidence": 85,
+                    })
+            if not has_auth_guard:
+                findings.append({
+                    "category": "framework_security",
+                    "framework": "FastAPI",
+                    "rule": "unauthenticated_route",
+                    "file": path,
+                    "line": line,
+                    "http_method": method,
+                    "route_or_handler": route_name,
+                    "auth_evidence": None,
+                    "authorization_evidence": None,
+                    "role_check_evidence": None,
+                    "ownership_check_evidence": None,
+                    "tenant_check_evidence": None,
+                    "object_access_evidence": None,
+                    "missing_evidence": "authentication evidence",
+                    "proof_status": "implicit",
+                    "finding_class": "potential_risk",
+                    "evidence_level": "partial",
+                    "confidence_reason": "A FastAPI route is present without obvious auth dependency evidence.",
+                    "boundary_crossing": True,
+                    "evidence_redacted": "FastAPI route without obvious auth dependency",
+                    "base_confidence": 70,
+                })
+                if is_admin:
+                    if re.search(r"(find_by_id|\.get\(|\.select\(|where\(.*id|delete|update|export)", lower) and not re.search(r"(role|permission|owner|tenant)", lower):
+                        findings.append({
+                            "category": "framework_security",
+                            "framework": "FastAPI",
+                            "rule": "confirmed_auth_bypass",
+                            "file": path,
+                            "line": line,
+                            "http_method": method,
+                            "route_or_handler": route_name,
+                            "auth_evidence": None,
+                            "authorization_evidence": None,
+                            "role_check_evidence": None,
+                            "ownership_check_evidence": None,
+                            "tenant_check_evidence": None,
+                            "object_access_evidence": "protected action with direct object access",
+                            "missing_evidence": "role, ownership, or tenant check",
+                            "proof_status": "explicit",
+                            "finding_class": "confirmed_vulnerability",
+                            "evidence_level": "proven",
+                            "confidence_reason": "An admin route performs a protected action with direct object access and no visible control.",
+                            "boundary_crossing": True,
+                            "evidence_redacted": "Confirmed auth bypass on admin route",
+                            "base_confidence": 88,
+                        })
+                    findings.append({
+                        "category": "framework_security",
+                        "framework": "FastAPI",
+                        "rule": "unrestricted_admin_endpoint",
+                        "file": path,
+                        "line": line,
+                        "http_method": method,
+                        "route_or_handler": route_name,
+                        "auth_evidence": None,
+                        "authorization_evidence": None,
+                        "role_check_evidence": None,
+                        "ownership_check_evidence": None,
+                        "tenant_check_evidence": None,
+                        "object_access_evidence": None,
+                        "missing_evidence": "role or permission check",
+                        "proof_status": "implicit",
+                        "finding_class": "potential_risk",
+                        "evidence_level": "partial",
+                        "confidence_reason": "An admin-style route is present without role or permission evidence.",
+                        "boundary_crossing": True,
+                        "evidence_redacted": "Admin-style route without dependency-based auth",
+                        "base_confidence": 75,
+                    })
+        if re.search(r"(prompt|system_prompt)\s*=\s*f?[\"'][^\"']*\{(?:user_input|input|message|content|query)\}", text, re.IGNORECASE) and not re.search(r"(validate|sanitize|delimiter|triple backticks|allowlist)", lower):
             findings.append({
                 "category": "framework_security",
                 "framework": "FastAPI",
@@ -54,7 +200,7 @@ def scan_file(path, findings):
                 "evidence_redacted": "Prompt construction appears to interpolate user input without clear delimiters or validation",
                 "base_confidence": 72,
             })
-        if route_match and re.search(r"\b(tool|tools|invoke|run_tool|execute_tool)\b", lower) and not re.search(r"(allowlist|policy|validate|check)", lower):
+        if re.search(r"\b(tool|tools|invoke|run_tool|execute_tool)\b", lower) and not re.search(r"(allowlist|policy|validate|check)", lower):
             findings.append({
                 "category": "framework_security",
                 "framework": "FastAPI",
@@ -64,6 +210,57 @@ def scan_file(path, findings):
                 "evidence_redacted": "Tool invocation appears to lack an allowlist or policy check",
                 "base_confidence": 74,
             })
+
+        object_access_match = OBJECT_ACCESS_PATTERNS.search(text)
+        if object_access_match and re.search(r"\b(id|uuid|pk)\b", lower):
+            has_ownership = re.search(r"(owner|ownership|user_id|tenant_id|org_id|workspace_id)\b", lower) or re.search(r"current_user\.(id|user_id)", lower) or re.search(r"current_user\s*==\s*\w+|\w+\s*==\s*current_user", lower)
+            findings.append({
+                "category": "framework_security",
+                "framework": "FastAPI",
+                "rule": "object_id_access",
+                "file": path,
+                "line": _line_number(text, object_access_match.group(0)),
+                "http_method": None,
+                "route_or_handler": "fastapi handler",
+                "auth_evidence": "route detected",
+                "authorization_evidence": "object access by id",
+                "role_check_evidence": None,
+                "ownership_check_evidence": "ownership or tenant check" if has_ownership else None,
+                "tenant_check_evidence": "tenant filter" if has_ownership else None,
+                "object_access_evidence": "object access by identifier",
+                "missing_evidence": None if has_ownership else "ownership or tenant check",
+                "proof_status": "explicit" if has_ownership else "implicit",
+                "finding_class": "potential_risk",
+                "evidence_level": "partial",
+                "confidence_reason": "Object access by identifier is visible, but ownership evidence is incomplete.",
+                "boundary_crossing": True,
+                "evidence_redacted": "Object access by identifier",
+                "base_confidence": 68 if not has_ownership else 55,
+            })
+            if has_ownership:
+                findings.append({
+                    "category": "framework_security",
+                    "framework": "FastAPI",
+                    "rule": "route_with_ownership_check",
+                    "file": path,
+                    "line": _line_number(text, object_access_match.group(0)),
+                    "http_method": None,
+                    "route_or_handler": "fastapi handler",
+                    "auth_evidence": "route detected",
+                    "authorization_evidence": "ownership or tenant check",
+                    "role_check_evidence": None,
+                    "ownership_check_evidence": "ownership or tenant check",
+                    "tenant_check_evidence": "tenant filter",
+                    "object_access_evidence": "object access by identifier",
+                    "missing_evidence": None,
+                    "proof_status": "explicit",
+                    "finding_class": "observed_capability",
+                    "evidence_level": "capability",
+                    "confidence_reason": "Ownership or tenant evidence is visible for object access by id.",
+                    "boundary_crossing": True,
+                    "evidence_redacted": "Object access with ownership check",
+                    "base_confidence": 75,
+                })
 
     if "supabase" in lower:
         service_role_literal = re.search(r"['\"][^'\"]*service[-_ ]role[^'\"]*['\"]", lower)
@@ -93,6 +290,54 @@ def scan_file(path, findings):
                 "evidence_redacted": "Supabase query without obvious tenant filter",
                 "base_confidence": 70,
             })
+        if re.search(r"(\.table\([^\)]*\)\.select\(|\.from\([^\)]*\)\.select\()", lower):
+            findings.append({
+                "category": "framework_security",
+                "framework": "Supabase",
+                "rule": "tenant_scoped_query",
+                "file": path,
+                "line": None,
+                "http_method": None,
+                "route_or_handler": "supabase query",
+                "auth_evidence": None,
+                "authorization_evidence": "tenant filter" if scoped_filter else None,
+                "role_check_evidence": None,
+                "ownership_check_evidence": None,
+                "tenant_check_evidence": "tenant filter" if scoped_filter else None,
+                "object_access_evidence": "resource access by query",
+                "missing_evidence": None if scoped_filter else "tenant filter",
+                "proof_status": "explicit" if scoped_filter else "implicit",
+                "finding_class": "observed_capability" if scoped_filter else "potential_risk",
+                "evidence_level": "capability" if scoped_filter else "partial",
+                "confidence_reason": "Tenant scoping is visible" if scoped_filter else "Tenant scoping is not visible in the query.",
+                "boundary_crossing": bool(scoped_filter),
+                "evidence_redacted": "Supabase query tenant scoping" if scoped_filter else "Supabase query without tenant filter",
+                "base_confidence": 60 if scoped_filter else 70,
+            })
+            if scoped_filter:
+                findings.append({
+                    "category": "framework_security",
+                    "framework": "Supabase",
+                    "rule": "route_with_tenant_check",
+                    "file": path,
+                    "line": None,
+                    "http_method": None,
+                    "route_or_handler": "supabase query",
+                    "auth_evidence": None,
+                    "authorization_evidence": "tenant filter",
+                    "role_check_evidence": None,
+                    "ownership_check_evidence": None,
+                    "tenant_check_evidence": "tenant filter",
+                    "object_access_evidence": "resource access by query",
+                    "missing_evidence": None,
+                    "proof_status": "explicit",
+                    "finding_class": "observed_capability",
+                    "evidence_level": "capability",
+                    "confidence_reason": "Tenant scoping is visible on the query.",
+                    "boundary_crossing": False,
+                    "evidence_redacted": "Supabase query with tenant filter",
+                    "base_confidence": 65,
+                })
 
     if "langgraph" in lower:
         if re.search(r"add_node|add_edge|compile\(", lower) and re.search(r"(tool|tools)", lower) and not re.search(r"(allowlist|validate|policy)", lower):

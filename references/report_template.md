@@ -15,6 +15,15 @@ by `category`, sort within each group by `severity` desc then `confidence` desc.
 - Overall posture: {{ Critical | Needs Attention | Acceptable | Strong }}
 - Network-verification pass: {{ run | skipped (reason) }}
 
+## Observed Capabilities
+...
+
+## Potential Risks
+...
+
+## Confirmed Vulnerabilities
+...
+
 ## Findings by Category
 
 ### Supply-Chain Risk
@@ -67,7 +76,8 @@ by `category`, sort within each group by `severity` desc then `confidence` desc.
 - Network-verified registry checks: {{ status }}
 - Known false-positive classes suppressed: {{ list, with reviewer note + expiry if from .audit-allowlist }}
 - This is a heuristic static review, not a substitute for a full penetration test
-  or dependency SCA tool; treat "Possible"/"Speculative" findings as leads, not facts.
+  or dependency SCA tool; treat observed capabilities as evidence of existence,
+  potential risks as review leads, and confirmed vulnerabilities as exploitable issues.
 ```
 
 Formatting rules:

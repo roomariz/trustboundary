@@ -505,13 +505,27 @@ def risk_acceptance_warnings(risk_acceptances):
 
 def _finding_evidence_summary(finding):
     snippet = finding.get("evidence_snippet") or finding.get("evidence_redacted") or "-"
-    return {
+    summary = {
         "why_detected": finding.get("evidence_snippet") or finding.get("evidence_redacted") or "Pattern matched by scanner heuristic.",
         "impacted_trust_boundary": finding.get("trust_boundary", ["unknown"]),
         "confidence_bucket": finding.get("confidence_bucket") or "Unknown",
         "remediation": finding.get("recommendation"),
         "evidence_snippet": snippet,
     }
+    summary.update({
+        "route_or_handler": finding.get("route_or_handler"),
+        "http_method": finding.get("http_method"),
+        "auth_evidence": finding.get("auth_evidence"),
+        "authorization_evidence": finding.get("authorization_evidence"),
+        "role_check_evidence": finding.get("role_check_evidence"),
+        "ownership_check_evidence": finding.get("ownership_check_evidence"),
+        "tenant_check_evidence": finding.get("tenant_check_evidence"),
+        "object_access_evidence": finding.get("object_access_evidence"),
+        "missing_evidence": finding.get("missing_evidence"),
+        "proof_status": finding.get("proof_status"),
+        "boundary_crossing": finding.get("boundary_crossing"),
+    })
+    return summary
 
 
 def _redact_sensitive_text(text):
@@ -605,6 +619,22 @@ def build_exposure(finding):
 def _path_classes(finding):
     source_class = None
     sink_class = None
+    if finding.get("category") == "framework_security":
+        rule = finding.get("rule")
+        if rule == "public_route_marked_public":
+            source_class = "unauthenticated_user"
+        elif rule in {"route_with_auth_middleware", "route_with_role_check", "route_with_permission_check", "route_with_ownership_check", "route_with_tenant_check"}:
+            source_class = "authenticated_session"
+        elif rule in {"unauthenticated_route", "unrestricted_admin_endpoint", "object_id_access", "missing_tenant_filters", "tenant_scoped_query"}:
+            source_class = "route_handler"
+        if rule in {"object_id_access", "route_with_ownership_check"}:
+            sink_class = "object_resource"
+        elif rule in {"missing_tenant_filters", "tenant_scoped_query", "route_with_tenant_check"}:
+            sink_class = "tenant_data"
+        elif rule == "unrestricted_admin_endpoint":
+            sink_class = "admin_action"
+        elif rule in {"unauthenticated_route", "public_route_marked_public"}:
+            sink_class = "route_handler"
     if finding["category"] in {"prompt_injection", "agentic_security"} or finding["rule"] in {"raw_prompt_concatenation", "direct_user_input_in_prompt", "missing_instruction_separation", "unsafe_prompt_construction"}:
         source_class = "prompt"
     elif finding["category"] == "retrieval_poisoning":
@@ -673,7 +703,23 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         metadata = CATEGORY_METADATA.get(finding["category"], {})
         path = Path(finding.get("file") or "")
         scope_tags = sorted(set(finding.get("scope_tags") or []) | set(path_scope_tags(path, repo_config)))
+        finding_class = finding.get("finding_class", "potential_risk")
+        evidence_level = finding.get("evidence_level") or ("proven" if finding_class == "confirmed_vulnerability" else "partial" if finding_class == "potential_risk" else "capability")
+        if finding.get("rule") in {"network_client_usage", "websocket_client_usage", "environment_variable_access", "credential_env_passthrough", "filesystem_read_access", "recursive_filesystem_operation"} and finding.get("proof_status") in {"source_only", "sink_only"}:
+            finding_class = "observed_capability"
+            evidence_level = "capability"
+        elif finding.get("proof_status") in {"implicit", "controlled"} and finding_class != "confirmed_vulnerability":
+            finding_class = "potential_risk"
+            evidence_level = "partial"
+        elif finding.get("proof_status") == "explicit" and finding_class != "observed_capability":
+            finding_class = "confirmed_vulnerability"
+            evidence_level = "proven"
+        trust_score_penalty = {"observed_capability": 0, "potential_risk": 1, "confirmed_vulnerability": 1}[finding_class]
         production_blocker = finding["severity"] == "Critical" or (finding["severity"] == "High" and finding["confidence_level"] == BLOCKING_CONFIDENCE)
+        if finding_class != "confirmed_vulnerability":
+            production_blocker = False
+        if finding["rule"] == "shell_true":
+            production_blocker = True
         if finding["rule"] == "high_entropy_literal":
             production_blocker = False
         if any(tag in {"documentation", "generated"} for tag in scope_tags) and finding["category"] != "leaked_secrets":
@@ -691,6 +737,9 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "remediation_priority": REMEDIATION_PRIORITY.get(finding["severity"], "RECOMMENDED"),
             "trust_boundary": metadata.get("trust_boundary", ["unknown"]),
             "production_blocker": production_blocker,
+            "finding_class": finding_class,
+            "evidence_level": evidence_level,
+            "trust_score_penalty": trust_score_penalty,
             "evidence_redacted": _redact_sensitive_text(finding.get("evidence_redacted") or finding.get("evidence")),
             "exposure": build_exposure({
                 **finding,
@@ -786,34 +835,92 @@ def is_documentation_finding(finding):
 
 
 def decision_inputs(findings):
-    production_findings = [finding for finding in findings if not is_documentation_finding(finding)]
+    production_findings = [finding for finding in findings if finding.get("finding_class") != "observed_capability" and not is_documentation_finding(finding)]
     accepted = [finding for finding in production_findings if finding.get("status") == "accepted_risk" and finding.get("severity") != "Critical" and finding.get("category") != "leaked_secrets"]
     production_findings = [finding for finding in production_findings if finding not in accepted]
     blockers = [
         finding
         for finding in production_findings
-        if finding.get("production_blocker")
-        or finding.get("severity") == "Critical"
+        if (
+            finding.get("production_blocker")
+            or (
+                finding.get("finding_class") == "confirmed_vulnerability"
+                and (
+                    finding.get("severity") == "Critical"
+                    or (finding.get("severity") == "High" and finding.get("confidence_level") in {"MEDIUM", "HIGH"})
+                )
+            )
+            or (finding.get("category") == "leaked_secrets" and finding.get("severity") == "Critical")
+        )
     ]
     review_items = [
         finding
         for finding in production_findings
-        if finding not in blockers and (finding.get("severity") in {"High", "Medium"} or finding.get("remediation_priority") == "RECOMMENDED")
+        if finding not in blockers
+        and (
+            finding.get("finding_class") == "potential_risk"
+            and (
+                finding.get("severity") in {"High", "Critical"}
+                or finding.get("confidence_level") in {"MEDIUM", "HIGH"}
+                or finding.get("category") in {"unsafe_execution", "leaked_secrets", "agentic_security", "mcp_tool_abuse", "retrieval_poisoning", "data_exfiltration"}
+            )
+            or (finding.get("finding_class") == "confirmed_vulnerability" and finding.get("confidence_level") == "LOW")
+        )
     ]
     return production_findings, blockers, review_items
 
 
-def release_decision(findings, audit_warnings=None):
+def readiness_decision(findings, audit_warnings=None):
     production_findings, blockers, review_items = decision_inputs(findings)
+    decision_reasons = []
+    def finding_id(finding):
+        return finding.get("id") or finding.get("rule") or finding.get("rule_id") or "unknown"
     if audit_warnings:
-        return "REVIEW_REQUIRED"
+        decision_reasons.append("Scanner failures prevent a complete production assessment.")
+        return {
+            "readiness": "NOT_READY_FOR_PRODUCTION",
+            "production_blockers": [finding_id(finding) for finding in blockers[:10]] + [f"scanner:{warning.get('scanner', 'unknown')}" for warning in audit_warnings],
+            "required_reviews": [finding_id(finding) for finding in review_items[:10]],
+            "decision_reasons": decision_reasons,
+        }
     if blockers:
-        return "NOT_READY_FOR_PRODUCTION"
+        decision_reasons.append("Critical confirmed vulnerabilities remain unresolved.")
+        return {
+            "readiness": "NOT_READY_FOR_PRODUCTION",
+            "production_blockers": [finding_id(finding) for finding in blockers[:10]],
+            "required_reviews": [finding_id(finding) for finding in review_items[:10]],
+            "decision_reasons": decision_reasons,
+        }
     if review_items:
-        return "REVIEW_REQUIRED"
+        if any(finding.get("severity") in {"High", "Critical"} and finding.get("confidence_level") in {"MEDIUM", "HIGH"} for finding in review_items):
+            decision_reasons.append("High-confidence production risks require review before release.")
+        else:
+            decision_reasons.append("Production review items remain.")
+        return {
+            "readiness": "REVIEW_REQUIRED",
+            "production_blockers": [],
+            "required_reviews": [finding["id"] for finding in review_items[:10]],
+            "decision_reasons": decision_reasons,
+        }
     if production_findings:
-        return "READY_WITH_REVIEW"
-    return "READY_FOR_PRODUCTION"
+        decision_reasons.append("Only informational production findings remain.")
+        return {
+            "readiness": "READY_WITH_REVIEW",
+            "production_blockers": [],
+            "required_reviews": [],
+            "decision_reasons": decision_reasons,
+        }
+    decision_reasons.append("No relevant production findings remain.")
+    return {
+        "readiness": "READY_FOR_PRODUCTION",
+        "production_blockers": [],
+        "required_reviews": [],
+        "decision_reasons": decision_reasons,
+    }
+
+
+def release_decision(findings, audit_warnings=None):
+    return readiness_decision(findings, audit_warnings=audit_warnings)["readiness"]
 
 
 def boundary_summary(findings):
@@ -838,6 +945,25 @@ def boundary_summary(findings):
             "status": "observed" if matched else "not_observed",
         }
     return summary
+
+
+def auth_review_summary(findings):
+    auth_findings = [finding for finding in findings if finding.get("category") == "framework_security"]
+    protected = [finding for finding in auth_findings if finding.get("auth_evidence") or finding.get("authorization_evidence") or finding.get("role_check_evidence") or finding.get("tenant_check_evidence") or finding.get("ownership_check_evidence")]
+    public = [finding for finding in auth_findings if finding.get("rule") == "public_route_marked_public"]
+    review_required = [
+        finding for finding in auth_findings
+        if finding.get("rule") in {"unauthenticated_route", "unrestricted_admin_endpoint", "object_id_access", "missing_tenant_filters", "tenant_scoped_query"}
+    ]
+    admin_review = [finding for finding in review_required if finding.get("rule") == "unrestricted_admin_endpoint"]
+    object_tenant_review = [finding for finding in review_required if finding.get("rule") in {"object_id_access", "missing_tenant_filters", "tenant_scoped_query"}]
+    return {
+        "protected_routes": len(protected),
+        "public_routes": len(public),
+        "routes_requiring_review": len(review_required),
+        "admin_routes_requiring_review": len(admin_review),
+        "object_tenant_routes_requiring_review": len(object_tenant_review),
+    }
 
 
 def attack_surface_summary(findings):
@@ -873,18 +999,23 @@ def _trust_score_deductions(findings):
         confidence = finding.get("confidence_level", "MEDIUM")
         base = severity_weights.get(severity, 8) + confidence_weights.get(confidence, 3)
         category = finding.get("category")
-        if finding.get("production_blocker"):
-            base += 6
-        if category == "agentic_security":
-            base += 6
-        if category == "retrieval_poisoning":
-            base += 5
-        if category == "mcp_tool_abuse":
-            base += 4
-        if category == "leaked_secrets":
-            base += 8
-        if is_documentation_finding(finding):
-            base = doc_weight.get(severity, 2) + (1 if confidence == "HIGH" else 0)
+        if finding.get("finding_class") == "observed_capability":
+            base = 0
+        elif finding.get("finding_class") == "potential_risk":
+            base = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Info": 0}.get(severity, 2)
+        else:
+            if finding.get("production_blocker"):
+                base += 6
+            if category == "agentic_security":
+                base += 6
+            if category == "retrieval_poisoning":
+                base += 5
+            if category == "mcp_tool_abuse":
+                base += 4
+            if category == "leaked_secrets":
+                base += 8
+            if is_documentation_finding(finding):
+                base = doc_weight.get(severity, 2) + (1 if confidence == "HIGH" else 0)
         deductions.append({
             "finding": finding,
             "points": base,
@@ -901,14 +1032,20 @@ def calculate_trust_score(findings, trust_paths_items, attack_chains_items, acti
     suppressed = list(findings)
     active_suppression_count = len(active_suppressions)
     expired_suppression_count = len(expired_suppressions)
-    blocked_findings = sum(1 for finding in suppressed if finding.get("production_blocker"))
-    doc_findings = [finding for finding in suppressed if is_documentation_finding(finding)]
-    prod_findings = [finding for finding in suppressed if not is_documentation_finding(finding) and (finding.get("scope") == "production" or "production" in set(finding.get("scope_tags", [])))]
-    agentic_findings = [finding for finding in suppressed if finding.get("category") == "agentic_security"]
-    trust_path_count = len(trust_paths_items or [])
-    attack_chain_count = len(attack_chains_items or [])
-    baseline_trust_path_count = len(trust_paths(unsuppressed_findings))
-    baseline_attack_chain_count = len(attack_chains(trust_paths(unsuppressed_findings)))
+    potential_findings = [finding for finding in suppressed if finding.get("finding_class") == "potential_risk"]
+    confirmed_findings = [finding for finding in suppressed if finding.get("finding_class") == "confirmed_vulnerability"]
+    blocked_findings = sum(1 for finding in confirmed_findings if finding.get("production_blocker"))
+    doc_findings = [finding for finding in confirmed_findings if is_documentation_finding(finding)]
+    prod_findings = [finding for finding in confirmed_findings if not is_documentation_finding(finding) and (finding.get("scope") == "production" or "production" in set(finding.get("scope_tags", [])))]
+    agentic_findings = [finding for finding in confirmed_findings if finding.get("category") == "agentic_security"]
+    confirmed_trust_paths = trust_paths(confirmed_findings)
+    trust_path_count = len(confirmed_trust_paths)
+    attack_chain_count = len(attack_chains(confirmed_trust_paths))
+    baseline_potential_findings = [finding for finding in unsuppressed_findings if finding.get("finding_class") == "potential_risk"]
+    baseline_confirmed_findings = [finding for finding in unsuppressed_findings if finding.get("finding_class") == "confirmed_vulnerability"]
+    baseline_trust_paths = trust_paths(baseline_confirmed_findings)
+    baseline_trust_path_count = len(baseline_trust_paths)
+    baseline_attack_chain_count = len(attack_chains(baseline_trust_paths))
 
     deductions = []
     total = 0
@@ -920,7 +1057,7 @@ def calculate_trust_score(findings, trust_paths_items, attack_chains_items, acti
         total += points
         deductions.append({"driver": label, "points": points, "evidence": evidence})
 
-    for entry in _trust_score_deductions(suppressed):
+    for entry in _trust_score_deductions(confirmed_findings):
         finding = entry["finding"]
         add(
             f"{finding.get('severity', 'Medium')} {finding.get('confidence_level', 'MEDIUM')} finding",
@@ -928,6 +1065,8 @@ def calculate_trust_score(findings, trust_paths_items, attack_chains_items, acti
             finding.get("id"),
         )
 
+    potential_points = min(10, sum(entry["points"] for entry in _trust_score_deductions(potential_findings)))
+    add("potential risks", potential_points, len(potential_findings))
     add("production-scope findings", min(12, len(prod_findings) * 2), len(prod_findings))
     add("documentation findings", min(6, len(doc_findings)), len(doc_findings))
     add("production blockers", min(18, blocked_findings * 6), blocked_findings)
@@ -939,23 +1078,25 @@ def calculate_trust_score(findings, trust_paths_items, attack_chains_items, acti
 
     raw_score = max(0, 100 - total)
     baseline_deductions = 0
-    for entry in _trust_score_deductions(unsuppressed_findings):
+    for entry in _trust_score_deductions(baseline_confirmed_findings):
         baseline_deductions += entry["points"]
-    baseline_deductions += min(12, sum(1 for finding in unsuppressed_findings if not is_documentation_finding(finding) and (finding.get("scope") == "production" or "production" in set(finding.get("scope_tags", [])))) * 2)
-    baseline_deductions += min(6, sum(1 for finding in unsuppressed_findings if is_documentation_finding(finding)))
-    baseline_deductions += min(18, sum(1 for finding in unsuppressed_findings if finding.get("production_blocker")) * 6)
+    baseline_deductions += min(10, sum(entry["points"] for entry in _trust_score_deductions(baseline_potential_findings)))
+    baseline_deductions += min(12, sum(1 for finding in baseline_confirmed_findings if not is_documentation_finding(finding) and (finding.get("scope") == "production" or "production" in set(finding.get("scope_tags", [])))) * 2)
+    baseline_deductions += min(6, sum(1 for finding in baseline_confirmed_findings if is_documentation_finding(finding)))
+    baseline_deductions += min(18, sum(1 for finding in baseline_confirmed_findings if finding.get("production_blocker")) * 6)
     baseline_deductions += min(24, baseline_trust_path_count * 4)
     baseline_deductions += min(28, baseline_attack_chain_count * 6)
     baseline_deductions += min(12, expired_suppression_count * 4)
     baseline_deductions += min(18, len(audit_warnings) * 6)
-    baseline_deductions += min(16, len([finding for finding in unsuppressed_findings if finding.get("category") == "agentic_security"]) * 3)
+    baseline_deductions += min(16, len([finding for finding in baseline_confirmed_findings if finding.get("category") == "agentic_security"]) * 3)
     baseline_score = max(0, 100 - baseline_deductions)
 
     final_score = min(raw_score, baseline_score)
     final_score = max(0, min(100, final_score))
 
     reasoning = [
-        f"Start at 100 and deduct for {len(suppressed)} finding(s), {trust_path_count} trust path(s), and {attack_chain_count} attack chain(s).",
+        f"Start at 100; observed capabilities do not reduce the score, potential risks are capped at 10 points, and confirmed vulnerabilities retain normal penalties.",
+        f"Classified findings: {len(confirmed_findings)} confirmed, {len(potential_findings)} potential, {len(suppressed) - len(confirmed_findings) - len(potential_findings)} observed.",
         f"Production-scope findings: {len(prod_findings)}.",
         f"Documentation findings: {len(doc_findings)}.",
         f"Production blockers: {blocked_findings}.",
@@ -990,33 +1131,43 @@ def production_readiness(findings, trust_paths_items, attack_chains_items, activ
             if suppression.get("rule") in critical_rules
         ]
 
-    production_findings = [finding for finding in findings if not is_documentation_finding(finding) and (finding.get("scope") == "production" or "production" in set(finding.get("scope_tags", [])))]
+    production_findings = [
+        finding
+        for finding in findings
+        if finding.get("finding_class") != "observed_capability"
+        and not is_documentation_finding(finding)
+        and (
+            finding.get("scope") == "production"
+            or "production" in set(finding.get("scope_tags", []))
+            or finding.get("category") == "framework_security"
+        )
+    ]
     pressure_findings = [finding for finding in production_findings if not (finding.get("status") == "accepted_risk" and finding.get("severity") != "Critical" and finding.get("category") != "leaked_secrets")]
-    blockers = [finding for finding in pressure_findings if finding.get("production_blocker") or finding.get("severity") == "Critical"]
-    review_items = [finding for finding in pressure_findings if finding not in blockers and finding.get("severity") in {"High", "Medium", "Low"}]
-    risky_paths = [path for path in trust_paths_items if path.get("risk") in {"High", "Critical"} and path.get("confidence") in {"High", "Medium"}]
-    high_confidence_chains = [chain for chain in attack_chains_items if chain.get("confidence_score", 0) >= 90]
-    unresolved_agentic_chains = [chain for chain in attack_chains_items if any("Agent" in boundary for boundary in chain.get("supporting_boundaries", [])) or "Agent" in chain.get("name", "")]
+    gate = readiness_decision(pressure_findings, audit_warnings=audit_warnings)
+    blockers = [finding for finding in pressure_findings if finding["id"] in set(gate["production_blockers"])]
+    review_items = [finding for finding in pressure_findings if finding["id"] in set(gate["required_reviews"])]
+    decision_paths = trust_paths(production_findings)
+    decision_chains = attack_chains(decision_paths)
+    risky_paths = [path for path in decision_paths if path.get("risk") in {"High", "Critical"} and path.get("confidence") in {"High", "Medium"}]
+    high_confidence_chains = [chain for chain in decision_chains if chain.get("confidence_score", 0) >= 90]
+    unresolved_agentic_chains = [chain for chain in decision_chains if any("Agent" in boundary for boundary in chain.get("supporting_boundaries", [])) or "Agent" in chain.get("name", "")]
 
     scanner_issue = any(warning.get("rule") in {"scanner_failed", "scanner_unavailable"} for warning in audit_warnings)
-    if scanner_issue:
+    if scanner_issue or critical_expired_suppressions():
         status = "NOT_READY_FOR_PRODUCTION"
-        reason = "Scanner failures prevent a complete production assessment."
-    elif blockers or critical_expired_suppressions():
+        reason = gate["decision_reasons"][0] if gate["decision_reasons"] else "Scanner failures prevent a complete production assessment."
+    elif gate["readiness"] == "NOT_READY_FOR_PRODUCTION":
         status = "NOT_READY_FOR_PRODUCTION"
-        reason = "Critical production risk remains unresolved."
-    elif any(finding.get("severity") == "High" for finding in pressure_findings) or high_confidence_chains or unresolved_agentic_chains or risky_paths:
+        reason = gate["decision_reasons"][0] if gate["decision_reasons"] else "Critical production risk remains unresolved."
+    elif gate["readiness"] == "REVIEW_REQUIRED" or any(finding.get("severity") == "High" and finding.get("finding_class") == "confirmed_vulnerability" for finding in pressure_findings) or high_confidence_chains or unresolved_agentic_chains or risky_paths:
         status = "REVIEW_REQUIRED"
-        reason = "High-confidence production risk paths or chains still need review."
-    elif review_items:
-        status = "READY_WITH_REVIEW"
-        reason = "Only medium or low production review items remain."
+        reason = gate["decision_reasons"][0] if gate["decision_reasons"] else "High-confidence production risk paths or chains still need review."
     elif trust_score_info.get("trust_score", 0) >= 90:
         status = "READY_FOR_PRODUCTION"
-        reason = "No meaningful production findings remain and trust score is high."
+        reason = gate["decision_reasons"][0] if gate["decision_reasons"] else "No meaningful production findings remain and trust score is high."
     else:
         status = "READY_WITH_REVIEW"
-        reason = "Residual production evidence remains, but it is limited to review items."
+        reason = gate["decision_reasons"][0] if gate["decision_reasons"] else "Residual production evidence remains, but it is limited to review items."
 
     next_steps = []
     if status == "NOT_READY_FOR_PRODUCTION":
@@ -1056,6 +1207,9 @@ def production_readiness(findings, trust_paths_items, attack_chains_items, activ
         "blockers": blockers_list,
         "review_items": review_item_ids,
         "recommended_next_steps": next_steps,
+        "decision_reasons": gate["decision_reasons"],
+        "production_blockers": gate["production_blockers"],
+        "required_reviews": gate["required_reviews"],
     }
 
 
@@ -1591,6 +1745,208 @@ def trust_paths(findings):
     return paths
 
 
+def _graph_trust_zone(label: str):
+    zone_map = {
+        "untrusted_input": "untrusted_user_input",
+        "prompt_content": "llm_prompt_context",
+        "retrieved_document": "retrieval_context",
+        "environment_variable": "secrets_environment",
+        "file_contents": "local_filesystem",
+        "mcp_response": "agent_tool_runtime",
+        "agent": "application_code",
+    }
+    return zone_map.get(label, "application_code")
+
+
+def _graph_node(node_id: str, node_type: str, label: str, finding=None, evidence=None, trust_zone=None):
+    return {
+        "node_id": node_id,
+        "node_type": node_type,
+        "label": label,
+        "file": (finding or {}).get("file"),
+        "line": (finding or {}).get("line"),
+        "evidence": evidence or (finding or {}).get("evidence_redacted") or (finding or {}).get("evidence_snippet") or (finding or {}).get("evidence"),
+        "trust_zone": trust_zone or "application_code",
+    }
+
+
+def build_trust_boundary_graph(findings, trust_paths_items=None):
+    trust_paths_items = list(trust_paths_items or trust_paths(findings))
+    nodes = {}
+    edges = []
+
+    def add_node(node_id, node_type, label, finding=None, evidence=None, trust_zone=None):
+        if node_id not in nodes:
+            nodes[node_id] = _graph_node(node_id, node_type, label, finding=finding, evidence=evidence, trust_zone=trust_zone)
+        return nodes[node_id]
+
+    def make_edge(edge_id, source_id, target_id, edge_type, boundary_crossing, from_zone, to_zone, finding=None, partial_evidence=False, evidence=None, trust_boundary=None):
+        edges.append({
+            "edge_id": edge_id,
+            "source": source_id,
+            "target": target_id,
+            "edge_type": edge_type,
+            "boundary_crossing": boundary_crossing,
+            "trust_zone_from": from_zone,
+            "trust_zone_to": to_zone,
+            "partial_evidence": partial_evidence,
+            "file": (finding or {}).get("file"),
+            "line": (finding or {}).get("line"),
+            "evidence": evidence or (finding or {}).get("evidence_redacted") or (finding or {}).get("evidence_snippet"),
+            "trust_boundary": trust_boundary,
+        })
+
+    for finding in findings:
+        node_type = {
+            "prompt_injection": "llm_prompt_component",
+            "retrieval_poisoning": "entry_point",
+            "mcp_tool_abuse": "agent_tool",
+            "unsafe_execution": "shell_sink",
+            "data_exfiltration": "network_sink",
+            "secret_leakage": "data_store",
+            "leaked_secrets": "data_store",
+            "agentic_security": "internal_component",
+        }.get(finding.get("category"), "internal_component")
+        trust_zone = {
+            "prompt_injection": "llm_prompt_context",
+            "retrieval_poisoning": "retrieval_context",
+            "mcp_tool_abuse": "agent_tool_runtime",
+            "unsafe_execution": "shell_runtime",
+            "data_exfiltration": "external_network",
+            "secret_leakage": "tenant_data",
+            "leaked_secrets": "tenant_data",
+            "agentic_security": "application_code",
+        }.get(finding.get("category"), "application_code")
+        add_node(finding["id"], node_type, finding.get("rule") or finding["category"], finding=finding, trust_zone=trust_zone)
+        if finding.get("category") == "framework_security":
+            rule = finding.get("rule")
+            if rule == "public_route_marked_public":
+                add_node("unauthenticated_user", "actor", "Unauthenticated User", trust_zone="external_user")
+                make_edge(
+                    f"{finding['id']}:public",
+                    "unauthenticated_user",
+                    finding["id"],
+                    "public_route",
+                    False,
+                    "external_user",
+                    "application_code",
+                    finding=finding,
+                    partial_evidence=False,
+                    evidence=finding.get("auth_evidence") or finding.get("evidence_redacted"),
+                    trust_boundary="public_route",
+                )
+            elif rule in {"route_with_auth_middleware", "route_with_role_check", "route_with_permission_check", "route_with_ownership_check", "route_with_tenant_check"}:
+                add_node("authenticated_session", "actor", "Authenticated Session", trust_zone="trusted_session")
+                make_edge(
+                    f"{finding['id']}:auth",
+                    "authenticated_session",
+                    finding["id"],
+                    "authenticated_route",
+                    True,
+                    "trusted_session",
+                    "application_code",
+                    finding=finding,
+                    partial_evidence=False,
+                    evidence=finding.get("auth_evidence") or finding.get("authorization_evidence") or finding.get("evidence_redacted"),
+                    trust_boundary="authenticated_route",
+                )
+            elif rule in {"unauthenticated_route", "unrestricted_admin_endpoint", "object_id_access", "missing_tenant_filters", "tenant_scoped_query"}:
+                add_node("route_handler", "entry_point", "Route Handler", trust_zone="application_code")
+                make_edge(
+                    f"{finding['id']}:route",
+                    "route_handler",
+                    finding["id"],
+                    "route_handler",
+                    False,
+                    "application_code",
+                    "application_code",
+                    finding=finding,
+                    partial_evidence=True,
+                    evidence=finding.get("route_or_handler") or finding.get("evidence_redacted"),
+                    trust_boundary="route_handler",
+                )
+                if rule == "object_id_access":
+                    add_node("object_resource", "data_store", "Object Resource", trust_zone="tenant_data")
+                    make_edge(
+                        f"{finding['id']}:object",
+                        finding["id"],
+                        "object_resource",
+                        "object_resource",
+                        True,
+                        "application_code",
+                        "tenant_data",
+                        finding=finding,
+                        partial_evidence=not finding.get("ownership_check_evidence"),
+                        evidence=finding.get("object_access_evidence") or finding.get("evidence_redacted"),
+                        trust_boundary="object_resource",
+                    )
+                if rule in {"missing_tenant_filters", "tenant_scoped_query", "route_with_tenant_check"}:
+                    add_node("tenant_data", "data_store", "Tenant Data", trust_zone="tenant_data")
+                    make_edge(
+                        f"{finding['id']}:tenant",
+                        finding["id"],
+                        "tenant_data",
+                        "tenant_data",
+                        bool(finding.get("tenant_check_evidence")),
+                        "application_code",
+                        "tenant_data",
+                        finding=finding,
+                        partial_evidence=not finding.get("tenant_check_evidence"),
+                        evidence=finding.get("tenant_check_evidence") or finding.get("evidence_redacted"),
+                        trust_boundary="tenant_data",
+                    )
+                if rule == "unrestricted_admin_endpoint":
+                    add_node("admin_user", "actor", "Admin User", trust_zone="trusted_session")
+                    add_node("admin_action", "privileged_action", "Admin Action", trust_zone="application_code")
+                    make_edge(
+                        f"{finding['id']}:admin",
+                        "admin_user",
+                        "admin_action",
+                        "admin_action",
+                        True,
+                        "trusted_session",
+                        "application_code",
+                        finding=finding,
+                        partial_evidence=not finding.get("role_check_evidence"),
+                        evidence=finding.get("role_check_evidence") or finding.get("authorization_evidence") or finding.get("evidence_redacted"),
+                        trust_boundary="admin_action",
+                    )
+
+    for path in trust_paths_items:
+        source_class = path.get("source_class")
+        sink_class = path.get("sink_class")
+        source_id = f"{path.get('boundary', 'boundary')}:source"
+        target_id = f"{path.get('boundary', 'boundary')}:sink"
+        if source_class:
+            add_node(source_id, "entry_point" if source_class in {"prompt", "retrieval", "tool", "environment"} else "internal_component", path.get("source"), trust_zone=_graph_trust_zone(source_class))
+        if sink_class:
+            add_node(target_id, "internal_component", path.get("sink"), trust_zone=_graph_trust_zone(sink_class))
+        make_edge(
+            f"{path.get('boundary', 'boundary')}:{path.get('risk', 'Medium')}",
+            source_id,
+            target_id,
+            path.get("boundary", "Unknown"),
+            True,
+            _graph_trust_zone(source_class or "agent"),
+            _graph_trust_zone(sink_class or "application_code"),
+            finding=None,
+            partial_evidence=not source_class or not sink_class,
+            evidence=path.get("data_flow_summary"),
+            trust_boundary=path.get("boundary"),
+        )
+
+    return {
+        "nodes": sorted(nodes.values(), key=lambda item: (item["node_type"], item["label"], item["node_id"])),
+        "edges": edges,
+        "summary": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "partial_edge_count": sum(1 for edge in edges if edge.get("partial_evidence")),
+            "boundary_crossing_count": sum(1 for edge in edges if edge.get("boundary_crossing")),
+        },
+    }
+
+
 def attack_chains(trust_paths_items):
     chains = []
     source_classes = {path.get("source_class") for path in trust_paths_items if path.get("source_class")}
@@ -1822,23 +2178,11 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     trust_score_info = calculate_trust_score(findings, paths, chains, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, unsuppressed_findings=unsuppressed_findings)
     readiness = production_readiness(findings, paths, chains, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, trust_score_info=trust_score_info, unsuppressed_findings=unsuppressed_findings)
     audit_trail = build_audit_trail(repo_path, findings, audit_warnings, active_suppressions, risk_state, trust_score_info, readiness, decision, repo_config=repo_config)
+    trust_boundary_graph = build_trust_boundary_graph(findings, paths)
+    auth_review = auth_review_summary(findings)
     incomplete_external_assessment = external_assessment_incomplete(external_summary)
 
-    blockers_exist = bool(required)
-    blocker_label = "Production Blockers" if decision == "NOT_READY_FOR_PRODUCTION" else "Blocking Review"
-    if audit_warnings:
-        required_reason = "One or more scanners failed, so the audit is incomplete and requires manual review"
-    elif decision == "NOT_READY_FOR_PRODUCTION":
-        required_reason = "Critical finding or High finding with high confidence requires production blocking remediation"
-    elif decision == "REVIEW_REQUIRED":
-        if blockers_exist:
-            required_reason = "Critical finding or High finding with high confidence requires blocking review"
-        else:
-            required_reason = "Findings exist, but none meet the production blocker threshold"
-    elif decision == "READY_WITH_REVIEW":
-        required_reason = "Findings exist, but none meet the production blocker threshold"
-    else:
-        required_reason = "No blockers or unresolved trust-boundary risks were found"
+    required_reason = readiness["reason"]
     lines = [
         f"# Repo Security Audit - {repo_path.name or repo_path} - {datetime.now().date().isoformat()}",
         "",
@@ -1877,6 +2221,8 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
             f"- Severity: {finding['severity']}",
             f"- Confidence: {finding['confidence_level']}",
             f"- Confidence bucket: {finding.get('confidence_bucket') or 'Unknown'}",
+            f"- Finding class: {finding.get('finding_class') or '-'}",
+            f"- Evidence level: {finding.get('evidence_level') or '-'}",
             f"- File path: {finding.get('file') or '-'}",
             f"- Line number: {finding.get('line') or '-'}",
             f"- Evidence snippet: {finding.get('evidence_redacted') or finding.get('evidence_snippet') or '-'}",
@@ -1914,7 +2260,47 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
 
     lines.extend([
         "",
+        "## Authentication and Authorisation Review",
+        f"- Protected routes detected: {auth_review['protected_routes']}",
+        f"- Public routes detected: {auth_review['public_routes']}",
+        f"- Routes requiring review: {auth_review['routes_requiring_review']}",
+        f"- Admin routes requiring review: {auth_review['admin_routes_requiring_review']}",
+        f"- Object/tenant access requiring review: {auth_review['object_tenant_routes_requiring_review']}",
+    ])
+    if auth_review["routes_requiring_review"]:
+        routes = [finding for finding in findings if finding.get("category") == "framework_security" and finding.get("rule") in {"unauthenticated_route", "unrestricted_admin_endpoint", "object_id_access", "missing_tenant_filters", "tenant_scoped_query"}]
+        for finding in routes[:10]:
+            lines.append(f"- {finding.get('http_method') or '-'} {finding.get('route_or_handler') or finding.get('rule')} - {finding.get('rule')}")
+
+    lines.extend([
+        "",
         render_audit_trail(audit_trail),
+        "",
+        "## Trust Boundary Graph",
+        f"- Nodes: {trust_boundary_graph['summary']['node_count']}",
+        f"- Edges: {trust_boundary_graph['summary']['edge_count']}",
+        f"- Boundary crossings: {trust_boundary_graph['summary']['boundary_crossing_count']}",
+        f"- Partial evidence edges: {trust_boundary_graph['summary']['partial_edge_count']}",
+        "- Highest-risk crossings:",
+    ])
+    graph_edges = [edge for edge in trust_boundary_graph["edges"] if edge.get("boundary_crossing")]
+    if graph_edges:
+        for edge in graph_edges[:10]:
+            lines.append(
+                f"  - {edge['edge_type']}: {edge['trust_zone_from']} -> {edge['trust_zone_to']} "
+                f"({'partial evidence' if edge.get('partial_evidence') else 'evidenced'})"
+            )
+    else:
+        lines.append("  - None")
+    lines.extend([
+        "- External egress paths:",
+        "  - " + ", ".join(sorted({f"{edge['trust_zone_from']} -> {edge['trust_zone_to']}" for edge in trust_boundary_graph["edges"] if edge["trust_zone_to"] in {"external_network", "third_party_service"}}) or ["None"]),
+        "- Execution paths:",
+        "  - " + ", ".join(sorted({edge["edge_type"] for edge in trust_boundary_graph["edges"] if edge["trust_zone_to"] in {"shell_runtime", "external_network"}}) or ["None"]),
+        "- AI/agent paths:",
+        "  - " + ", ".join(sorted({edge["edge_type"] for edge in trust_boundary_graph["edges"] if edge["trust_zone_from"] in {"llm_prompt_context", "retrieval_context", "agent_tool_runtime"}}) or ["None"]),
+        "- Tenant-data paths:",
+        "  - " + ", ".join(sorted({edge["edge_type"] for edge in trust_boundary_graph["edges"] if edge["trust_zone_from"] == "tenant_data" or edge["trust_zone_to"] == "tenant_data"}) or ["None"]),
         "",
         "## Cybersecurity Exposure Map",
     ])
@@ -1922,16 +2308,33 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         exposure = finding.get("exposure") or build_exposure(finding)
         lines.append(f"- {finding['id']} -> {exposure['attack_path']} ({finding.get('file') or '-'}:{finding.get('line') or '-'})")
 
-    lines.extend([
-        "",
-        "## Leakage Findings",
-    ])
-    if findings:
-        for finding in findings[:10]:
+    observed_capabilities = [finding for finding in findings if finding.get("finding_class") == "observed_capability"]
+    potential_risks = [finding for finding in findings if finding.get("finding_class") == "potential_risk"]
+    confirmed_vulnerabilities = [finding for finding in findings if finding.get("finding_class") == "confirmed_vulnerability"]
+
+    lines.extend(["", "## Observed Capabilities"])
+    if observed_capabilities:
+        for finding in observed_capabilities[:10]:
             lines.extend(_finding_block(finding))
             lines.append("")
     else:
-        lines.append("No leakage findings identified.")
+        lines.append("No observed capabilities identified.")
+
+    lines.extend(["", "## Potential Risks"])
+    if potential_risks:
+        for finding in potential_risks[:10]:
+            lines.extend(_finding_block(finding))
+            lines.append("")
+    else:
+        lines.append("No potential risks identified.")
+
+    lines.extend(["", "## Confirmed Vulnerabilities"])
+    if confirmed_vulnerabilities:
+        for finding in confirmed_vulnerabilities[:10]:
+            lines.extend(_finding_block(finding))
+            lines.append("")
+    else:
+        lines.append("No confirmed vulnerabilities identified.")
 
     lines.extend([
         "## Attack Paths",
@@ -1980,26 +2383,22 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     for finding in findings[:10]:
         lines.append(f"- {finding_heading(finding)}: {finding.get('recommendation')}")
 
-    lines.extend([
-        "",
-        "## Production Blockers",
-    ])
-    blockers = [finding for finding in findings if finding.get("production_blocker")]
+    blockers = [finding for finding in findings if finding["id"] in set(readiness["production_blockers"])]
     if blockers:
+        lines.extend([
+            "",
+            "## Production Blockers",
+        ])
         for finding in blockers[:10]:
             lines.append(f"- {finding['id']} - {finding['rule']} ({finding['severity']}, {finding['confidence_level']})")
-    else:
-        lines.append("No production blockers identified.")
-
-    lines.extend([
-        "",
-        "## Review Items",
-    ])
-    if recommended:
-        for finding in recommended[:10]:
+    elif readiness["review_items"]:
+        lines.extend([
+            "",
+            "## Required Review",
+        ])
+        review_candidates = [finding for finding in findings if finding["id"] in set(readiness["review_items"])]
+        for finding in review_candidates[:10]:
             lines.append(f"- {finding_heading(finding)} ({finding['severity']}, {finding['confidence_level']}) {finding['rule']} - {finding.get('recommendation')}")
-    else:
-        lines.append("No review items identified.")
 
     false_positive_notes = [finding for finding in findings if finding["confidence_level"] == "LOW" or "test" in set(finding.get("scope_tags", []))]
     lines.extend([
@@ -2078,18 +2477,6 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
             lines.append(f"- **{chain['name']}** ({chain['risk']}, confidence {chain.get('confidence_score', '-')}) - {chain['reason']}")
     else:
         lines.append("- No attack chains inferred.")
-
-    lines.extend([
-        "",
-        f"## {blocker_label}",
-    ])
-    if required:
-        for finding in required[:10]:
-            lines.append(f"- {finding['id']} ({finding['severity']}, {finding['confidence_level']}) {finding['rule']} - {finding.get('recommendation')}")
-        if len(required) > 10:
-            lines.append(f"- ... and {len(required) - 10} more in JSON")
-    else:
-        lines.append(f"No {blocker_label.lower()} identified.")
 
     documentation_notes = [finding for finding in findings if is_documentation_finding(finding)]
     lines.extend([
@@ -2320,6 +2707,8 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
         scope: sum(1 for finding in findings if scope in set(finding.get("scope_tags", [])))
         for scope in ["production", "test", "dependency", "generated", "documentation"]
     }
+    trust_boundary_graph = build_trust_boundary_graph(findings, trust_paths(findings))
+    auth_review = auth_review_summary(findings)
     return {
         "schema_version": 3,
         "repo": {
@@ -2333,7 +2722,8 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
             "severity_counts": counts,
             "overall_posture": posture_label(counts),
             "release_decision": decision,
-            "production_blockers": sum(1 for finding in findings if finding.get("production_blocker")),
+            "production_blockers": len(readiness["production_blockers"]),
+            "decision_reasons": readiness["decision_reasons"],
             "scanner_failures": len(audit_warnings or []),
             "trust_score": trust_score_info["trust_score"],
             "trust_grade": trust_score_info["trust_grade"],
@@ -2344,6 +2734,9 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
                 "blockers": readiness["blockers"],
                 "review_items": readiness["review_items"],
                 "recommended_next_steps": readiness["recommended_next_steps"],
+                "decision_reasons": readiness["decision_reasons"],
+                "production_blockers": readiness["production_blockers"],
+                "required_reviews": readiness["required_reviews"],
             },
             "scope_counts": scope_counts,
         },
@@ -2365,6 +2758,8 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
         "attack_surface": surface,
         "trust_paths": trust_paths(findings),
         "attack_chains": attack_chains(trust_paths(findings)),
+        "trust_boundary_graph": trust_boundary_graph,
+        "auth_review": auth_review,
         "framework_specific_findings": [
             {
                 "id": finding["id"],
@@ -2387,7 +2782,7 @@ def _sarif_level(severity: str) -> str:
     return SARIF_SEVERITY_MAP.get(severity, "warning")
 
 
-def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: bool = False, external_summary=None):
+def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: bool = False, external_summary=None, readiness=None):
     def _rule_sort_key(rule):
         return (
             rule.get("fullDescription", {}).get("text", ""),
@@ -2427,6 +2822,8 @@ def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: boo
                 "production_blocker": finding.get("production_blocker"),
                 "status": finding.get("status"),
                 "exposure": finding.get("exposure"),
+                "finding_class": finding.get("finding_class"),
+                "evidence_level": finding.get("evidence_level"),
             },
         }
 
@@ -2449,6 +2846,8 @@ def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: boo
                 "production_blocker": finding.get("production_blocker"),
                 "status": finding.get("status"),
                 "exposure": finding.get("exposure"),
+                "finding_class": finding.get("finding_class"),
+                "evidence_level": finding.get("evidence_level"),
             },
         }
         if explain and finding.get("exposure"):
@@ -2477,6 +2876,16 @@ def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: boo
                 },
                 "properties": {
                     "external_cybersecurity_engines": external_summary or {"engines": [], "warnings": [], "findings": [], "assessment_complete": True},
+                    "production_readiness": {
+                        "status": (readiness or {}).get("status"),
+                        "decision_reasons": (readiness or {}).get("decision_reasons", []),
+                        "production_blockers": (readiness or {}).get("production_blockers", []),
+                        "required_reviews": (readiness or {}).get("required_reviews", []),
+                    },
+                    "trust_boundary_graph": {
+                        "node_count": len(build_trust_boundary_graph(findings)["nodes"]),
+                        "edge_count": len(build_trust_boundary_graph(findings)["edges"]),
+                    },
                 },
                 "results": results,
             }
@@ -2567,7 +2976,7 @@ def main(argv=None):
             report += "\n" + warnings_block
         report_path.write_text(report, encoding="utf-8")
         if args.sarif:
-            sarif_output = build_sarif_output(target_repo, json_output["findings"], repo_config=repo_config, explain=args.explain, external_summary=external_summary)
+            sarif_output = build_sarif_output(target_repo, json_output["findings"], repo_config=repo_config, explain=args.explain, external_summary=external_summary, readiness=json_output["summary"]["production_readiness"])
             sarif_path.write_text(json.dumps(sarif_output, indent=2), encoding="utf-8")
         emit("")
         log_line("Done.", kind="success", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)

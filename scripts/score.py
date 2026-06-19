@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -55,6 +56,15 @@ SEVERITY_BY_RULE = {
     "websocket_client_usage": "Low",
     "unauthenticated_route": "High",
     "unrestricted_admin_endpoint": "High",
+    "public_route_marked_public": "Low",
+    "route_with_auth_middleware": "Low",
+    "route_with_role_check": "Low",
+    "route_with_permission_check": "Low",
+    "route_with_ownership_check": "Low",
+    "route_with_tenant_check": "Low",
+    "object_id_access": "High",
+    "confirmed_auth_bypass": "Critical",
+    "tenant_scoped_query": "Medium",
     "service_role_key_exposure": "Critical",
     "missing_tenant_filters": "High",
     "unrestricted_tool_routing": "High",
@@ -117,6 +127,53 @@ SEVERITY_BY_RULE = {
     "codeql_finding": "High",
 }
 
+OBSERVED_CAPABILITY_RULES = {
+    "network_client_usage",
+    "websocket_client_usage",
+    "environment_variable_access",
+    "credential_env_passthrough",
+    "filesystem_read_access",
+    "recursive_filesystem_operation",
+}
+
+POTENTIAL_RISK_CATEGORIES = {
+    "retrieval_poisoning",
+    "data_exfiltration",
+}
+
+CONFIRMED_VULNERABILITY_RULES = {
+    "shell_true",
+    "eval_on_dynamic_input",
+    "string_concat_into_shell",
+    "exec_call",
+    "os_system",
+    "child_process_exec",
+    "unrestricted_network_tool",
+    "missing_tenant_filters",
+    "object_id_access",
+    "confirmed_auth_bypass",
+}
+
+SOURCE_RULES = {
+    "network_client_usage": "http_request",
+    "websocket_client_usage": "http_request",
+    "environment_variable_access": "environment_variable",
+    "credential_env_passthrough": "secret",
+    "filesystem_read_access": "file_contents",
+    "recursive_filesystem_operation": "file_contents",
+}
+
+SINK_RULES = {
+    "network_client_usage": "network",
+    "websocket_client_usage": "network",
+    "shell_true": "execution",
+    "eval_on_dynamic_input": "execution",
+    "string_concat_into_shell": "execution",
+    "exec_call": "execution",
+    "os_system": "execution",
+    "child_process_exec": "execution",
+}
+
 LOW_CONTEXT_TAGS = ["test", "fixture", "example", "sample", "mock"]
 AGGREGATED_RULES = {"environment_variable_access", "unpinned_version", "high_entropy_literal"}
 AGGREGATED_CATEGORIES = {"supply_chain", "insecure_config"}
@@ -142,6 +199,188 @@ def confidence_bucket(score):
     if score >= 25:
         return "Possible"
     return "Speculative"
+
+
+def evidence_level_for_finding(finding):
+    if finding.get("finding_class") == "confirmed_vulnerability":
+        return "proven"
+    if finding.get("finding_class") == "potential_risk":
+        return "partial"
+    return "capability"
+
+
+def _source_class_for_finding(finding):
+    rule = finding.get("rule")
+    category = finding.get("category")
+    evidence = (finding.get("evidence_redacted") or finding.get("evidence") or "").lower()
+    if any(marker in evidence for marker in ("user_input", "request", "query", "param", "prompt", "content")):
+        return "untrusted_input"
+    if category == "retrieval_poisoning":
+        return "retrieved_document"
+    if category == "agentic_security":
+        return "prompt_content"
+    if category == "mcp_tool_abuse":
+        return "mcp_response"
+    if rule in {"environment_variable_access", "credential_env_passthrough"}:
+        return "environment_variable"
+    if rule == "filesystem_read_access":
+        return "file_contents"
+    return None
+
+
+def _sink_class_for_finding(finding):
+    rule = finding.get("rule")
+    category = finding.get("category")
+    if category == "retrieval_poisoning":
+        return "prompt_construction"
+    if category == "agentic_security":
+        return "agent_tool_invocation"
+    if category == "mcp_tool_abuse":
+        return "mcp_tool_exposure"
+    if rule in {"shell_true", "eval_on_dynamic_input", "string_concat_into_shell", "exec_call", "os_system", "child_process_exec"}:
+        return "execution"
+    if rule in {"network_client_usage", "websocket_client_usage"}:
+        return "network"
+    return None
+
+
+def _flow_path_for_finding(finding):
+    source = _source_class_for_finding(finding)
+    sink = _sink_class_for_finding(finding)
+    if source and sink:
+        return [source, sink]
+    if source:
+        return [source]
+    if sink:
+        return [sink]
+    return []
+
+
+def _has_explicit_control(text: str):
+    text = text.lower()
+    return any(token in text for token in ("sanitize", "allowlist", "whitelist", "validate", "escape", "strip()", "json.dumps", "html.escape"))
+
+
+def _flow_confidence_reason(finding, confidence):
+    if finding.get("rule") in OBSERVED_CAPABILITY_RULES:
+        return "This finding only shows a security-relevant source or sink capability."
+    if confidence >= 80:
+        return "The evidence text explicitly connects a source value to a sink with no effective control."
+    return "The evidence suggests a source and sink are present, but the data-flow path is not explicit enough to confirm impact."
+
+
+def enrich_flow_evidence(finding, confidence=None):
+    if finding.get("category") == "framework_security":
+        finding_class = finding.get("finding_class", "potential_risk")
+        evidence_level = finding.get("evidence_level") or evidence_level_for_finding({"finding_class": finding_class})
+        return {
+            "source": None,
+            "sink": None,
+            "flow_path": [],
+            "boundary_crossing": bool(finding.get("boundary_crossing")),
+            "controls_observed": [],
+            "controls_missing": [],
+            "proof_status": finding.get("proof_status", "unsupported"),
+            "evidence_level": evidence_level,
+            "finding_class": finding_class,
+            "confidence_reason": finding.get("confidence_reason") or "Framework security evidence was observed.",
+        }
+    evidence = (finding.get("evidence_redacted") or finding.get("evidence") or "")
+    source = _source_class_for_finding(finding)
+    sink = _sink_class_for_finding(finding)
+    flow_path = _flow_path_for_finding(finding)
+    controls_observed = []
+    controls_missing = []
+    proof_status = "unsupported"
+    evidence_level = "capability"
+    finding_class = "observed_capability"
+
+    if source and not sink:
+        proof_status = "source_only"
+        evidence_level = "capability"
+        if finding.get("rule") not in OBSERVED_CAPABILITY_RULES:
+            finding_class = finding_class_for_finding(finding, confidence if confidence is not None else finding.get("base_confidence", 40))
+    elif sink and not source:
+        proof_status = "sink_only"
+        evidence_level = "capability"
+        if finding.get("rule") in OBSERVED_CAPABILITY_RULES:
+            finding_class = "observed_capability"
+        elif finding.get("rule") in CONFIRMED_VULNERABILITY_RULES:
+            finding_class = finding_class_for_finding(finding, confidence if confidence is not None else finding.get("base_confidence", 40))
+            evidence_level = "proven" if finding_class == "confirmed_vulnerability" else "partial"
+    elif source and sink:
+        if finding.get("rule") in OBSERVED_CAPABILITY_RULES and not any(marker in evidence.lower() for marker in ("user_input", "request", "query", "param", "prompt", "content")):
+            return {
+                "source": source,
+                "sink": sink,
+                "flow_path": flow_path,
+                "boundary_crossing": False,
+                "controls_observed": [],
+                "controls_missing": [],
+                "proof_status": "capability",
+                "evidence_level": "capability",
+                "finding_class": "observed_capability",
+                "confidence_reason": _flow_confidence_reason(finding, confidence if confidence is not None else finding.get("base_confidence", 40)),
+            }
+        proof_status = "explicit" if re.search(r"\b(return|=|\.|f['\"]|f\")", evidence) else "implicit"
+        if _has_explicit_control(evidence):
+            controls_observed.append("sanitization_or_allowlist")
+            finding_class = "potential_risk"
+            proof_status = "controlled"
+            evidence_level = "partial"
+        elif proof_status == "explicit":
+            finding_class = "confirmed_vulnerability"
+            evidence_level = "proven"
+        else:
+            finding_class = "potential_risk"
+            evidence_level = "partial"
+        if finding.get("rule") in OBSERVED_CAPABILITY_RULES:
+            finding_class = "observed_capability"
+            evidence_level = "capability"
+    else:
+        proof_status = "unsupported"
+    if finding_class == "confirmed_vulnerability":
+        controls_missing.append("effective_sanitization_or_allowlist")
+    return {
+        "source": source,
+        "sink": sink,
+        "flow_path": flow_path,
+        "boundary_crossing": bool(source and sink),
+        "controls_observed": controls_observed,
+        "controls_missing": controls_missing,
+        "proof_status": proof_status,
+        "evidence_level": evidence_level,
+        "finding_class": finding_class,
+        "confidence_reason": _flow_confidence_reason(finding, confidence if confidence is not None else finding.get("base_confidence", 40)),
+    }
+
+
+def finding_class_for_finding(finding, confidence):
+    if finding.get("rule") == "public_route_marked_public":
+        return "observed_capability"
+    if finding.get("rule") in {"route_with_auth_middleware", "route_with_role_check", "route_with_permission_check", "route_with_ownership_check", "route_with_tenant_check", "tenant_scoped_query"}:
+        return "observed_capability"
+    if finding.get("rule") == "confirmed_auth_bypass":
+        return "confirmed_vulnerability"
+    if finding.get("category") == "retrieval_poisoning" or finding.get("rule") in POTENTIAL_RISK_RULES:
+        return "potential_risk"
+    if finding.get("category") == "leaked_secrets" and finding.get("rule") not in {"high_entropy_literal", "generic_secret_assignment"}:
+        return "confirmed_vulnerability"
+    if finding.get("category") == "secret_leakage" and confidence >= 80:
+        return "confirmed_vulnerability"
+    if finding.get("category") == "container_security" and confidence >= 80:
+        return "confirmed_vulnerability"
+    if finding.get("rule") == "service_role_key_exposure":
+        return "confirmed_vulnerability"
+    if finding.get("rule") in CONFIRMED_VULNERABILITY_RULES:
+        evidence = (finding.get("evidence_redacted") or finding.get("evidence") or "").lower()
+        if any(marker in evidence for marker in ("user_input", "input", "request", "param", "query", "filename", "filepath")) or confidence >= 80:
+            return "confirmed_vulnerability"
+    if finding.get("rule") in OBSERVED_CAPABILITY_RULES:
+        return "observed_capability"
+    if finding.get("category") == "unsafe_execution":
+        return "confirmed_vulnerability" if confidence >= 80 else "potential_risk"
+    return "potential_risk" if confidence >= 50 else "observed_capability"
 
 
 def adjust_confidence(finding):
@@ -193,6 +432,21 @@ def adjust_confidence(finding):
     if finding.get("category") == "agentic_security" and finding.get("rule") in {"persistent_instruction", "cross_session_contamination", "hidden_memory_directive", "unsafe_memory_write", "sensitive_memory_storage"}:
         score = min(score, 90)
     return max(0, min(100, score))
+
+
+POTENTIAL_RISK_RULES = {
+    "hardcoded_webhook_url",
+    "data_in_url_query",
+    "suspicious_dns_exfil_shape",
+    "base64_post_body",
+    "undeclared_telemetry_beacon",
+    "retrieval_prompt_injection",
+    "retrieval_tool_instructions",
+    "retrieval_hidden_instruction",
+    "retrieval_policy_violation",
+    "untrusted_retrieval_ingestion",
+    "persistent_poisoned_context",
+}
 
 
 def severity_for_finding(finding):
@@ -334,6 +588,24 @@ def _aggregate_group(group_id, items):
         "files": files,
         "representative_locations": locations[:3],
         "status": "open",
+        "source": representative.get("source"),
+        "sink": representative.get("sink"),
+        "flow_path": representative.get("flow_path", []),
+        "boundary_crossing": representative.get("boundary_crossing", False),
+        "controls_observed": representative.get("controls_observed", []),
+        "controls_missing": representative.get("controls_missing", []),
+        "proof_status": representative.get("proof_status", "unsupported"),
+        "finding_class": representative.get("finding_class", "potential_risk"),
+        "confidence_reason": representative.get("confidence_reason"),
+        "route_or_handler": representative.get("route_or_handler"),
+        "http_method": representative.get("http_method"),
+        "auth_evidence": representative.get("auth_evidence"),
+        "authorization_evidence": representative.get("authorization_evidence"),
+        "role_check_evidence": representative.get("role_check_evidence"),
+        "ownership_check_evidence": representative.get("ownership_check_evidence"),
+        "tenant_check_evidence": representative.get("tenant_check_evidence"),
+        "object_access_evidence": representative.get("object_access_evidence"),
+        "missing_evidence": representative.get("missing_evidence"),
     }
 
 
@@ -372,6 +644,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         scope = scope_tags[0]
         confidence = adjust_confidence(finding)
         severity = severity_for_finding(finding)
+        finding_class = finding_class_for_finding(finding, confidence)
         row = {
             "id": f"{finding['category'].upper()}-{next(counter):04d}",
             "category": finding["category"],
@@ -389,6 +662,9 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "evidence_snippet": _evidence_snippet(finding),
             "status": "open",
             "base_confidence": finding.get("base_confidence", 40),
+            "finding_class": finding_class,
+            "evidence_level": evidence_level_for_finding({"finding_class": finding_class}),
+            **enrich_flow_evidence(finding, confidence),
         }
         scored_rows.append(row)
         dedupe_groups[_dedupe_key(row)].append(row)
@@ -405,6 +681,26 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         deduped_row["files"] = files or [representative.get("file")]
         deduped_row["scope_tags"] = scope_tags or list(representative.get("scope_tags", []))
         deduped_row["representative_locations"] = [{"file": row.get("file"), "line": row.get("line")} for row in sorted(rows, key=_row_sort_key)[:3]]
+        deduped_row["source"] = representative.get("source")
+        deduped_row["sink"] = representative.get("sink")
+        deduped_row["flow_path"] = representative.get("flow_path", [])
+        deduped_row["boundary_crossing"] = representative.get("boundary_crossing", False)
+        deduped_row["controls_observed"] = representative.get("controls_observed", [])
+        deduped_row["controls_missing"] = representative.get("controls_missing", [])
+        deduped_row["proof_status"] = representative.get("proof_status", "unsupported")
+        deduped_row["confidence_reason"] = representative.get("confidence_reason")
+        for key in [
+            "route_or_handler",
+            "http_method",
+            "auth_evidence",
+            "authorization_evidence",
+            "role_check_evidence",
+            "ownership_check_evidence",
+            "tenant_check_evidence",
+            "object_access_evidence",
+            "missing_evidence",
+        ]:
+            deduped_row[key] = representative.get(key)
         deduped_rows.append(deduped_row)
         if representative["rule"] in AGGREGATED_RULES or representative["category"] in AGGREGATED_CATEGORIES:
             grouped[(representative["category"], representative["rule"], representative.get("scope"))].extend(rows)
