@@ -169,10 +169,13 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
     for finding in scored["findings"]:
         metadata = CATEGORY_METADATA.get(finding["category"], {})
         path = Path(finding.get("file") or "")
-        production_blocker = finding["severity"] in BLOCKING_SEVERITIES and finding["confidence_level"] == BLOCKING_CONFIDENCE
+        production_blocker = finding["severity"] == "Critical" or (finding["severity"] == "High" and finding["confidence_level"] == BLOCKING_CONFIDENCE)
         if finding["rule"] == "high_entropy_literal":
             production_blocker = False
-        if path.suffix.lower() in {".md", ".txt", ".rst"} and finding["category"] != "leaked_secrets":
+        is_doc_path = path.suffix.lower() in {".md", ".txt", ".rst"}
+        if is_doc_path and finding["category"] != "leaked_secrets":
+            production_blocker = False
+        if is_doc_path and finding["category"] in {"prompt_injection", "framework_security"} and finding["rule"] not in {"real_secret_pattern", "dangerous_code_block"}:
             production_blocker = False
         if is_test_path(path) and not include_tests:
             production_blocker = False
@@ -250,9 +253,9 @@ def posture_label(counts):
 
 
 def release_decision(findings):
-    if any(f.get("severity") in BLOCKING_SEVERITIES and f.get("confidence_level") == BLOCKING_CONFIDENCE and f.get("production_blocker") for f in findings):
+    if any(f.get("production_blocker") for f in findings):
         return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("severity") == "Medium" for f in findings):
+    if any(f.get("severity") == "Medium" or (f.get("severity") == "High" and f.get("confidence_level") != BLOCKING_CONFIDENCE) for f in findings):
         return "REVIEW_REQUIRED"
     if any(f.get("category") in {"prompt_injection", "mcp_tool_abuse", "data_exfiltration", "framework_security"} for f in findings):
         return "REVIEW_REQUIRED"
@@ -292,8 +295,13 @@ def attack_surface_summary(findings):
 
 
 def top_risks(findings):
+    eligible = [
+        finding
+        for finding in findings
+        if not (Path(finding.get("file") or "").suffix.lower() in {".md", ".txt", ".rst"} and finding.get("category") not in {"leaked_secrets"})
+    ]
     return sorted(
-        findings,
+        eligible,
         key=lambda finding: (
             SEVERITY_ORDER.get(finding["severity"], 9),
             -int(finding.get("confidence", 0)),
@@ -371,6 +379,8 @@ def render_report(repo_path: Path, scored, scope_summary):
     framework_items = framework_findings(findings)
     risks = top_risks(findings)
 
+    blocker_label = "Production Blockers" if decision == "NOT_READY_FOR_PRODUCTION" else "Required Review"
+    required_reason = "Critical finding or High finding with high confidence requires production blocking remediation" if decision == "NOT_READY_FOR_PRODUCTION" else "High severity or unresolved trust-boundary risk requires review"
     lines = [
         f"# Repo Security Audit - {repo_path.name or repo_path} - {datetime.now().date().isoformat()}",
         "",
@@ -382,7 +392,7 @@ def render_report(repo_path: Path, scored, scope_summary):
         "",
         "## Release Decision",
         f"- {decision}",
-        f"- Reason: {'High severity + high confidence blocker found' if decision == 'NOT_READY_FOR_PRODUCTION' else 'Medium severity or unresolved trust-boundary risk present' if decision == 'REVIEW_REQUIRED' else 'No blockers or unresolved trust-boundary risks were found'}",
+        f"- Reason: {required_reason if decision != 'READY_FOR_PRODUCTION' else 'No blockers or unresolved trust-boundary risks were found'}",
         "",
         "## Top Risks",
     ]
@@ -409,7 +419,7 @@ def render_report(repo_path: Path, scored, scope_summary):
 
     lines.extend([
         "",
-        "## Production Blockers",
+        f"## {blocker_label}",
     ])
     if required:
         for finding in required[:10]:
@@ -417,7 +427,7 @@ def render_report(repo_path: Path, scored, scope_summary):
         if len(required) > 10:
             lines.append(f"- ... and {len(required) - 10} more in JSON")
     else:
-        lines.append("No production blockers identified.")
+        lines.append(f"No {blocker_label.lower()} identified.")
 
     lines.extend([
         "",
@@ -433,8 +443,13 @@ def render_report(repo_path: Path, scored, scope_summary):
         "",
         "## Aggregated Findings",
     ])
-    for finding in findings:
+    high_critical = [f for f in findings if f["severity"] in {"Critical", "High"}]
+    medium = [f for f in findings if f["severity"] == "Medium"][:10]
+    low = [f for f in findings if f["severity"] == "Low"]
+    for finding in high_critical + medium:
         lines.append(f"- {finding['id']} | {finding['rule_id']} | {finding['severity']} | {finding['confidence_level']} | {finding.get('occurrences', 1)} occurrence(s)")
+    if low:
+        lines.append(f"- Low findings: {len(low)} total, summarized in JSON")
 
     lines.extend([
         "",

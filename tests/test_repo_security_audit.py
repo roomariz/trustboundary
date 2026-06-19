@@ -332,7 +332,7 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
     assert "Release Decision" in report
     assert "Top Risks" in report
     assert "Trust Boundary Assessment" in report
-    assert "Production Blockers" in report
+    assert "Required Review" in report
     assert "Review Items" in report
     assert "Aggregated Findings" in report
     assert "Filesystem Access" in report
@@ -375,7 +375,7 @@ subprocess.run("echo hi", shell=True)
     payload = json.loads(findings_path.read_text(encoding="utf-8"))
     assert payload["findings"]
     assert any(finding["rule"] == "shell_true" for finding in payload["findings"])
-    assert payload["summary"]["release_decision"] == "READY_FOR_PRODUCTION"
+    assert payload["summary"]["release_decision"] == "REVIEW_REQUIRED"
     assert all(finding["confidence_level"] in {"LOW", "MEDIUM", "HIGH"} for finding in payload["findings"])
 
     report = report_path.read_text(encoding="utf-8")
@@ -642,6 +642,40 @@ subprocess.run("echo hi", shell=True)
     assert any(finding["file"].endswith("README.md") for finding in payload["findings"])
 
 
+def test_review_required_report_uses_required_review_section(tmp_path):
+    repo = tmp_path / "review-required"
+    repo.mkdir()
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["release_decision"] == "REVIEW_REQUIRED"
+    assert payload["summary"]["production_blockers"] == 0
+
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "## Required Review" in report
+    assert "## Production Blockers" not in report
+    assert "No required review identified." not in report
+
+
+def test_high_severity_medium_confidence_is_required_review_not_blocker(tmp_path):
+    repo = tmp_path / "high-medium"
+    repo.mkdir()
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    shell_true = next(finding for finding in payload["findings"] if finding["rule"] == "shell_true")
+    assert shell_true["severity"] == "High"
+    assert shell_true["confidence_level"] == "MEDIUM"
+    assert shell_true["production_blocker"] is False
+    assert payload["summary"]["release_decision"] == "REVIEW_REQUIRED"
+
+
 def test_vendor_findings_do_not_create_production_blockers_by_default(tmp_path):
     repo = tmp_path / "vendor"
     repo.mkdir()
@@ -654,6 +688,55 @@ def test_vendor_findings_do_not_create_production_blockers_by_default(tmp_path):
     payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
     assert all("vendor" not in finding["file"] for finding in payload["findings"])
     assert payload["summary"]["production_blockers"] == 0
+
+
+def test_readme_and_docs_prose_do_not_enter_top_risks(tmp_path):
+    repo = tmp_path / "docs-prose"
+    repo.mkdir()
+    write(
+        repo / "README.md",
+        """# Tenant isolation
+
+This prose mentions cross-tenant access and tenant boundaries as design notes only.
+""",
+    )
+    write(
+        repo / "docs" / "production-hardening.md",
+        """# Production hardening
+
+The text mentions tenant isolation, cross-tenant retrieval, and framework notes for review.
+""",
+    )
+    write(
+        repo / "AE.CAP.md",
+        """# Framework note
+
+This framework note mentions prompt injection, tenant isolation, and model guidance in prose.
+""",
+    )
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert any(finding["file"].endswith(".md") for finding in payload["findings"])
+    assert "## Top Risks" in report
+    assert "README.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
+    assert "production-hardening.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
+    assert "AE.CAP.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
+
+
+def test_print_logging_is_not_prompt_injection(tmp_path):
+    repo = tmp_path / "print-log"
+    repo.mkdir()
+    write(repo / "app.py", 'print(f"status={user_input}")\n')
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert not any(finding["category"] == "prompt_injection" for finding in payload["findings"])
 
 
 def test_env_access_finding_uses_configuration_advice(tmp_path):
@@ -764,7 +847,7 @@ def test_release_decision_line_uses_expected_status_type(tmp_path):
     result = run_audit_cli(repo, tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert "✓ Release Decision: READY_FOR_PRODUCTION" in result.stdout
+    assert "Release Decision: REVIEW_REQUIRED" in result.stdout
 
 
 def test_markdown_limits_required_fixes_to_top_10(tmp_path):
@@ -777,10 +860,25 @@ def test_markdown_limits_required_fixes_to_top_10(tmp_path):
 
     assert result.returncode == 0, result.stderr
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
-    required_section = report.split("## Production Blockers", 1)[1].split("## Review Items", 1)[0]
+    required_section = report.split("## Required Review", 1)[1].split("## Review Items", 1)[0]
     required_lines = [line for line in required_section.splitlines() if line.startswith("- UNSAFE_EXECUTION")]
     assert len(required_lines) <= 10
     assert "more in JSON" in required_section
+
+
+def test_markdown_aggregated_findings_groups_low_findings(tmp_path):
+    repo = tmp_path / "low-findings"
+    repo.mkdir()
+    for index in range(15):
+        write(repo / f"low{index}.py", "import os\nvalue = os.getenv('API_KEY')\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    aggregated_section = report.split("## Aggregated Findings", 1)[1].split("## Trust Boundary Profile", 1)[0]
+    assert "Low findings:" in aggregated_section
+    assert aggregated_section.count("| Low |") == 0
 
 
 def test_command_files_exist():

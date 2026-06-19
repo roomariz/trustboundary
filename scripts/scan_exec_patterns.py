@@ -31,7 +31,7 @@ ENV_PATTERNS = [
 
 PROMPT_PATTERNS = [
     ("raw_prompt_concatenation", r"(?i)\b(prompt|system_prompt|messages?)\b.*(\+|\.format\(|f[\"'])\s*(user_input|input|message|messages|content)", 70),
-    ("direct_user_input_in_prompt", r"(?i)f[\"'][^\"']*\{(?:user_input|input|message|messages|content)\}[^\"']*[\"']", 65),
+    ("direct_user_input_in_prompt", r"(?i)\b(prompt|system_prompt|messages?|system|user|content|message|chat|model|completion|invoke)\b.*f[\"'][^\"']*\{(?:user_input|input|message|messages|content|query|text|prompt)\}[^\"']*[\"']", 65),
     ("missing_instruction_separation", r"(?i)\b(prompt|system prompt)\b.*\b(append|concat|combine|mix)\b", 60),
 ]
 
@@ -74,6 +74,8 @@ def scan_file(path, findings):
         append_matches(path, lineno, line, findings, "insecure_config", ENV_PATTERNS)
         append_matches(path, lineno, line, findings, "prompt_injection", PROMPT_PATTERNS)
         append_matches(path, lineno, line, findings, "insecure_config", ACCESS_PATTERNS)
+        if re.search(r"(?i)\bprint\s*\(\s*f[\"']", line):
+            continue
         if re.search(r"(?i)\bopen\s*\(", line) and re.search(r"(?i)(mode\s*=\s*['\"]?[wax+]|['\"][wax+]['\"])", line):
             findings.append({
                 "category": "unsafe_execution", "rule": "filesystem_write_access",
