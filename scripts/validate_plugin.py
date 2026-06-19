@@ -49,6 +49,16 @@ def main() -> int:
     except Exception as exc:
         return fail(f"package.json could not be parsed: {exc}")
 
+    version_file = ROOT / "VERSION"
+    if not version_file.exists():
+        return fail("VERSION is missing")
+    version_text = version_file.read_text(encoding="utf-8").strip()
+    package_version = package_data.get("version")
+    if not version_text:
+        return fail("VERSION is empty")
+    if package_version != version_text:
+        return fail(f"VERSION ({version_text}) does not match package.json version ({package_version})")
+
     if package_data.get("bin", {}).get("repo-security-audit") != "bin/repo-security-audit.js":
         return fail("package.json is missing the repo-security-audit bin entry")
     if not package_data.get("name") or not package_data.get("version") or "bin" not in package_data or "files" not in package_data:

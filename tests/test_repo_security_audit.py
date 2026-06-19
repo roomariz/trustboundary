@@ -932,6 +932,30 @@ def test_validate_plugin_script_passes(tmp_path):
     assert "Plugin validation passed" in result.stdout
 
 
+def test_validate_plugin_rejects_version_mismatch(tmp_path, monkeypatch):
+    repo = tmp_path / "plugin"
+    repo.mkdir()
+    write(repo / "package.json", json.dumps({"name": "repo-security-audit", "version": "2.0.0", "bin": {"repo-security-audit": "bin/repo-security-audit.js"}, "files": ["bin", "scripts", "commands", ".opencode", ".codex-plugin", "skills", "README.md", "LICENSE", "CHANGELOG.md", "VERSION"]}))
+    write(repo / "VERSION", "1.0.0\n")
+    for path in [
+        repo / "bin" / "repo-security-audit.js",
+        repo / "scripts" / "run_audit.py",
+        repo / "commands" / "repo-security-audit.md",
+        repo / ".opencode" / "command" / "repo-security-audit.md",
+        repo / ".codex-plugin" / "commands" / "repo-security-audit.md",
+        repo / "skills" / "repo-security-audit" / "SKILL.md",
+        repo / "CHANGELOG.md",
+        repo / "README.md",
+        repo / "LICENSE",
+    ]:
+        write(path, "placeholder\n")
+
+    validate_module = load_script_module("validate_plugin")
+    monkeypatch.setattr(validate_module, "ROOT", repo)
+
+    assert validate_module.main() == 1
+
+
 def test_cli_shows_progress_by_default(tmp_path):
     repo = tmp_path / "progress"
     repo.mkdir()

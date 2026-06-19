@@ -10,6 +10,8 @@ Developers and AI-agent users need a quick way to audit unfamiliar code before t
 
 This package provides a read-only, CLI-backed security audit plugin. It scans a target repository with local static checks and produces structured JSON plus a Markdown report for review.
 
+The report includes a production security gate, Top Risks, Trust Boundary Assessment, and aggregated findings summary. The release decision distinguishes `REVIEW_REQUIRED` from `NOT_READY_FOR_PRODUCTION`.
+
 ## What It Checks
 
 - Secrets and credentials
