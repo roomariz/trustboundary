@@ -1,8 +1,31 @@
-# Trustboundary
+# TrustBoundary
 
 TrustBoundary is a local, deterministic, read-only repository trust-boundary auditor.
 
 It reviews repositories, AI-generated code, MCP servers, agent systems, plugins and skills.
+
+## Naming
+
+- The project is TrustBoundary.
+- The npm package may be published as `repo-security-audit`.
+- The CLI exposes both `trustboundary` and `repo-security-audit`.
+- The recommended command for users is `trustboundary`.
+
+## Installation
+
+### Install from GitHub
+
+```powershell
+npm uninstall -g trustboundary
+npm install -g github:roomariz/trustboundary
+```
+
+## Quick Start
+
+```powershell
+cd D:\path\to\target\repository
+trustboundary scan "." --full --sarif --explain
+```
 
 ## Problem
 
@@ -45,6 +68,8 @@ Evidence determines classification.
 - `SECURITY_AUDIT_REPORT.md`
 - `security-audit-findings.sarif` when `--sarif` is used
 
+Reports are written to the current working directory.
+
 ## Sample Report Excerpt
 
 ```md
@@ -67,11 +92,40 @@ Evidence determines classification.
 - Dangerous primitives are not automatically vulnerabilities.
 - Findings are evidence-based review leads unless marked confirmed.
 
+## Design Principles
+
+- Local-first
+- Read-only
+- Deterministic
+- Evidence-based
+- No automatic remediation
+- No source-code upload during analysis
+
+## Release Decisions
+
+### READY_FOR_PRODUCTION
+
+No material findings requiring review.
+
+### REVIEW_REQUIRED
+
+Security-relevant findings require human review before deployment.
+
+### NOT_READY_FOR_PRODUCTION
+
+Confirmed vulnerabilities or production-blocking findings were detected.
+
 ## Supported Usage
 
 Python 3 is required for the audit engine. On Windows, the npm global install uses a Node wrapper which locates Python automatically.
 
 CLI:
+
+```bash
+trustboundary scan "." --full --sarif --explain
+```
+
+Legacy CLI example:
 
 ```bash
 repo-security-audit /path/to/repo
@@ -80,13 +134,19 @@ repo-security-audit /path/to/repo
 Codex slash command:
 
 ```text
-/repo-security-audit
+/trustboundary scan "." --full --sarif --explain
 ```
 
 OpenCode command:
 
 ```text
-repo-security-audit .
+trustboundary scan . --full --sarif --explain
+```
+
+Legacy package command:
+
+```bash
+repo-security-audit scan "." --full --sarif --explain
 ```
 
 GitHub Actions:
@@ -109,7 +169,8 @@ Skill usage:
 ## Safety Model
 
 - Read-only scanning
-- No network calls
+- The scan does not intentionally call external services or upload source code during analysis.
+- Installation and package updates may require network access.
 - No auto-remediation
 - Does not modify target repositories except for the generated audit outputs in the current working directory
 
@@ -120,36 +181,3 @@ This is heuristic static scanning. It is not a full SAST platform, a penetration
 ## Release Readiness
 
 Run `python scripts/validate_plugin.py` and `pytest -q` before release to confirm the bundle and CLI wiring are intact.
-
-### Phase 5 Release Note
-
-Phase 5 adds Multi-Tenant Isolation Analysis.
-
-- The scanner now reports tenant evidence, tenant propagation, query scope, retrieval scope, ownership scope, and missing tenant controls.
-- The trust-boundary graph now includes tenant-context, repository, query, retrieval, prompt, agent-tool, and external-network tenant paths.
-- JSON output includes `tenant_controls_detected`, `tenant_review_count`, and `confirmed_cross_tenant_findings`.
-- Markdown output includes `## Multi-Tenant Isolation Review`.
-- Readiness behavior keeps tenant capability evidence informational, requires review for material tenant-isolation gaps, and blocks production on confirmed cross-tenant exposure.
-
-Validation:
-
-- `python scripts/validate_plugin.py`
-- `pytest -q`
-- `124 passed`
-
-### Phase 7 Release Note
-
-Phase 7 adds Infrastructure Security Analysis.
-
-- The scanner stays local and read-only while reviewing Dockerfiles, compose files, GitHub Actions workflows, Terraform, Kubernetes manifests, Helm charts, Supabase config, and `.env` template files.
-- Infrastructure findings preserve evidence fields such as `infrastructure_surface`, `config_file`, `config_key`, `observed_evidence`, `missing_evidence`, `controls_observed`, `controls_missing`, `boundary_crossing`, `proof_status`, `finding_class`, `evidence_level`, `confidence_score`, `confidence_band`, and `confidence_reason`.
-- The trust-boundary graph now includes infrastructure edges for CI workflows, deployment targets, container host access, external network access, Kubernetes host/runtime access, Supabase tenant data, and Terraform cloud resources.
-- JSON output includes `infrastructure_files_detected`, `infrastructure_review_count`, and `confirmed_infrastructure_findings`.
-- Markdown output now includes `## Infrastructure Security Review`.
-- Readiness remains conservative: observed capability is informational, material infrastructure risks require review, and confirmed secret exposure, privileged host access, or dangerous deployment paths block production.
-
-Validation:
-
-- `python scripts/validate_plugin.py`
-- `pytest -q`
-- `132 passed`
