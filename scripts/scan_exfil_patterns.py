@@ -14,7 +14,7 @@ PATTERNS = [
     ("suspicious_dns_exfil_shape", r"[a-f0-9]{16,}\.[a-z0-9.\-]+\.(com|net|io|xyz)", 35),
     ("base64_post_body", r"(fetch|axios\.post|requests\.post)\([^)]*btoa\(", 50),
     ("undeclared_telemetry_beacon", r"(?i)(beacon|telemetry|analytics)\.send\(", 30),
-    ("network_client_usage", r"\b(requests\.(get|post|put|patch|delete|request|Session)|httpx\.(get|post|put|patch|delete|request|Client|AsyncClient)|aiohttp\.(ClientSession|request)|urllib\.(request|parse)|socket\.(socket|create_connection)|fetch\s*\(|axios\.(get|post|put|patch|delete|request|create))\b", 50),
+    ("network_client_usage", r"\b(requests\.(get|post|put|patch|delete|request|Session)|httpx\.(get|post|put|patch|delete|request|Client|AsyncClient)|aiohttp\.(ClientSession|request)|urllib\.request\.(urlopen|Request)|socket\.(socket|create_connection|connect)|fetch\s*\(|axios\.(get|post|put|patch|delete|request|create)|WebSocket\s*\(|new\s+WebSocket)\b", 50),
     ("websocket_client_usage", r"(?i)\b(new\s+WebSocket|WebSocket\s*\(|ws\.(connect|send)|socket\.io)\b", 45),
 ]
 

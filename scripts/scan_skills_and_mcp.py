@@ -142,13 +142,18 @@ def scan_mcp_config(path, findings):
         if not isinstance(data, dict):
             warn_parse(path, findings, "package.json did not parse as an object")
             return
-        if not data.get("pi", {}).get("skills"):
-            findings.append({
-                "category": "mcp_tool_abuse", "rule": "unscoped_bash_tool",
-                "file": path, "line": None,
-                "evidence_redacted": "package.json missing explicit skills entry",
-                "base_confidence": 50,
-            })
+        has_mcp_surface = any(
+            key in data
+            for key in ("mcpServers", "mcp", "skills", "allowed-tools")
+        ) or any(
+            isinstance(data.get(section), dict) and any(
+                tool_key in data.get(section, {})
+                for tool_key in ("mcpServers", "mcp", "skills", "allowed-tools")
+            )
+            for section in ("codex", "agents", "tooling", "runtime", "config")
+        )
+        if not has_mcp_surface:
+            return
         return
     if base == "plugin.json":
         if not isinstance(data, dict):

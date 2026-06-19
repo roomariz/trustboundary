@@ -8,6 +8,16 @@ import sys, os, re, json, math, fnmatch
 from pathlib import Path
 from scanner_utils import iter_repo_files, relativise, is_lockfile
 LOW_CONTEXT_PATTERNS = ["test", "fixture", "example", "sample", "mock", "placeholder"]
+SAFE_SECRET_PLACEHOLDERS = {
+    "ollama-is-local",
+    "local-only",
+    "not-required",
+    "dummy",
+    "placeholder",
+    "example",
+    "changeme",
+    "test-key",
+}
 
 SIGNATURES = [
     ("aws_access_key_id", r"AKIA[0-9A-Z]{16}", 90),
@@ -38,6 +48,10 @@ def scan_file(path: str, findings: list):
     for lineno, line in enumerate(lines, start=1):
         for name, pattern, base_conf in SIGNATURES:
             for m in re.finditer(pattern, line):
+                if name == "generic_secret_assignment":
+                    assigned = extract_assigned_literal(line)
+                    if assigned is not None and assigned.lower() in SAFE_SECRET_PLACEHOLDERS:
+                        continue
                 conf = max(0, min(100, base_conf + context_discount(path)))
                 findings.append({
                     "category": "leaked_secrets",
@@ -68,6 +82,13 @@ def redact(s: str) -> str:
     if len(s) <= 8:
         return "*" * len(s)
     return s[:4] + "*" * (len(s) - 8) + s[-4:]
+
+
+def extract_assigned_literal(line: str):
+    match = re.search(r"(?i)(secret|api[_-]?key|password|token)\s*[:=]\s*['\"]([^'\"]+)['\"]", line)
+    if not match:
+        return None
+    return match.group(2).strip()
 
 def walk(repo_path: str, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None, ignore_patterns=()):
     findings = []

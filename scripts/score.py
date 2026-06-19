@@ -110,6 +110,21 @@ def _location_sort_key(finding):
     return (finding.get("file") or "", finding.get("line") or 0)
 
 
+def _dedupe_key(finding):
+    return (finding.get("rule_id") or finding.get("rule"), finding.get("severity"), finding.get("confidence_level"))
+
+
+def _row_sort_key(item):
+    return (
+        {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}.get(item["severity"], 9),
+        -int(item["confidence"]),
+        item.get("scope") or "",
+        item.get("file") or "",
+        item.get("line") or 0,
+        item.get("rule") or "",
+    )
+
+
 def _evidence_snippet(finding):
     evidence = finding.get("evidence_redacted") or finding.get("evidence") or "-"
     location = finding.get("file") or "-"
@@ -183,6 +198,7 @@ def correlate(findings):
 
 def score_findings(raw_findings, include_dependencies: bool = False, include_tests: bool = False):
     grouped = defaultdict(list)
+    dedupe_groups = defaultdict(list)
     scored_rows = []
     counter = itertools.count(1)
     for finding in raw_findings:
@@ -209,8 +225,23 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "base_confidence": finding.get("base_confidence", 40),
         }
         scored_rows.append(row)
-        if finding["rule"] in AGGREGATED_RULES or finding["category"] in AGGREGATED_CATEGORIES:
-            grouped[(finding["category"], finding["rule"], scope)].append(row)
+        dedupe_groups[_dedupe_key(row)].append(row)
+
+    deduped_rows = []
+    for rows in dedupe_groups.values():
+        representative = sorted(rows, key=_row_sort_key)[0]
+        files = sorted({row.get("file") for row in rows if row.get("file")})
+        scope_tags = sorted({tag for row in rows for tag in row.get("scope_tags", [])})
+        occurrences = len(rows)
+        deduped_row = dict(representative)
+        deduped_row["occurrences"] = occurrences
+        deduped_row["files_affected"] = len(files) or 1
+        deduped_row["files"] = files or [representative.get("file")]
+        deduped_row["scope_tags"] = scope_tags or list(representative.get("scope_tags", []))
+        deduped_row["representative_locations"] = [{"file": row.get("file"), "line": row.get("line")} for row in sorted(rows, key=_row_sort_key)[:3]]
+        deduped_rows.append(deduped_row)
+        if representative["rule"] in AGGREGATED_RULES or representative["category"] in AGGREGATED_CATEGORIES:
+            grouped[(representative["category"], representative["rule"], representative.get("scope"))].extend(rows)
 
     aggregated = []
     emitted = set()
@@ -218,7 +249,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         aggregated.append(_aggregate_group(f"{key[0].upper()}-{key[1].upper()}", items))
         emitted.add(key)
 
-    for row in scored_rows:
+    for row in deduped_rows:
         key = (row["category"], row["rule"], row.get("scope"))
         if key not in emitted:
             aggregated.append(row)
@@ -232,8 +263,8 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         item.get("rule") or "",
     )
     aggregated.sort(key=sort_key)
-    scored_rows.sort(key=sort_key)
-    return {"findings": aggregated, "correlations": correlate(aggregated), "raw_findings": scored_rows}
+    deduped_rows.sort(key=sort_key)
+    return {"findings": aggregated, "correlations": correlate(aggregated), "raw_findings": deduped_rows}
 
 
 def main():

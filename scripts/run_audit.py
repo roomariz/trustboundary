@@ -169,7 +169,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
     for finding in scored["findings"]:
         metadata = CATEGORY_METADATA.get(finding["category"], {})
         path = Path(finding.get("file") or "")
-        scope_tags = path_scope_tags(path, repo_config)
+        scope_tags = sorted(set(finding.get("scope_tags") or []) | set(path_scope_tags(path, repo_config)))
         production_blocker = finding["severity"] == "Critical" or (finding["severity"] == "High" and finding["confidence_level"] == BLOCKING_CONFIDENCE)
         if finding["rule"] == "high_entropy_literal":
             production_blocker = False
@@ -190,6 +190,13 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "production_blocker": production_blocker,
         })
     return {"findings": findings, "correlations": scored["correlations"]}
+
+
+def _should_count_for_production_signal(finding):
+    scope_tags = set(finding.get("scope_tags", []))
+    if "documentation" in scope_tags and finding.get("category") not in {"leaked_secrets"} and finding.get("severity") != "Critical":
+        return False
+    return True
 
 
 def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool = False, include_tests: bool = False, include_env_files: bool = False, colour_enabled: bool = False, use_icons: bool = True, ignore_patterns: tuple[str, ...] = (), config=None):
@@ -264,13 +271,14 @@ def posture_label(counts):
 
 
 def release_decision(findings, audit_warnings=None):
+    production_findings = [finding for finding in findings if _should_count_for_production_signal(finding)]
     if audit_warnings:
         return "REVIEW_REQUIRED"
-    if any(f.get("production_blocker") for f in findings):
+    if any(f.get("production_blocker") for f in production_findings):
         return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("severity") == "Medium" or (f.get("severity") == "High" and f.get("confidence_level") != BLOCKING_CONFIDENCE) for f in findings):
+    if any(f.get("severity") == "Medium" or (f.get("severity") == "High" and f.get("confidence_level") != BLOCKING_CONFIDENCE) for f in production_findings):
         return "REVIEW_REQUIRED"
-    if any(f.get("category") in {"prompt_injection", "mcp_tool_abuse", "data_exfiltration", "framework_security"} for f in findings):
+    if any(f.get("category") in {"prompt_injection", "mcp_tool_abuse", "data_exfiltration", "framework_security"} for f in production_findings):
         return "REVIEW_REQUIRED"
     return "READY_FOR_PRODUCTION"
 
@@ -313,8 +321,11 @@ def top_risks(findings, repo_config=None):
     eligible = [
         finding
         for finding in findings
-        if path_scope_tags(Path(finding.get("file") or ""), repo_config) == ("production",)
-        or finding.get("category") in {"leaked_secrets"}
+        if (
+            path_scope_tags(Path(finding.get("file") or ""), repo_config) == ("production",)
+            or finding.get("category") == "leaked_secrets"
+            or (finding.get("severity") == "Critical" and "documentation" in path_scope_tags(Path(finding.get("file") or ""), repo_config))
+        )
     ]
     return sorted(
         eligible,
@@ -559,6 +570,10 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
     counts = risk_counts(findings)
     decision = release_decision(findings, audit_warnings=audit_warnings)
     surface = attack_surface_summary(findings)
+    scope_counts = {
+        scope: sum(1 for finding in findings if scope in set(finding.get("scope_tags", [])))
+        for scope in ["production", "test", "dependency", "generated", "documentation"]
+    }
     return {
         "schema_version": 2,
         "repo": {
@@ -573,7 +588,7 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
             "release_decision": decision,
             "production_blockers": sum(1 for finding in findings if finding.get("production_blocker")),
             "scanner_failures": len(audit_warnings or []),
-            "scope_counts": surface["findings_by_scope"],
+            "scope_counts": scope_counts,
         },
         "scope": scope_summary,
         "trust_boundary": boundary_summary(findings),

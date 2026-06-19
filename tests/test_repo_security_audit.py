@@ -634,6 +634,18 @@ def test_env_files_are_scanned_for_secrets_only(tmp_path):
     assert "unsafe_prompt_construction" not in rules
 
 
+def test_placeholder_secret_values_are_not_flagged(tmp_path):
+    repo = tmp_path / "placeholder-secret"
+    repo.mkdir()
+    write(repo / "app.py", 'api_key="ollama-is-local"\n')
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert not any(finding["category"] == "leaked_secrets" for finding in payload["findings"])
+
+
 def test_lockfiles_do_not_trigger_entropy_secret_scanning(tmp_path):
     repo = tmp_path / "lockfiles"
     repo.mkdir()
@@ -645,6 +657,26 @@ def test_lockfiles_do_not_trigger_entropy_secret_scanning(tmp_path):
     assert result.returncode == 0, result.stderr
     payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
     assert not any(finding["rule"] == "high_entropy_literal" for finding in payload["findings"])
+
+
+def test_urlparse_does_not_trigger_exfiltration_but_requests_get_does(tmp_path):
+    urlparse_repo = tmp_path / "urlparse-only"
+    urlparse_repo.mkdir()
+    write(urlparse_repo / "app.py", "from urllib.parse import urlparse\nvalue = urlparse('https://example.com')\n")
+
+    urlparse_result = run_audit(urlparse_repo, tmp_path)
+    assert urlparse_result.returncode == 0, urlparse_result.stderr
+    urlparse_payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert not any(finding["category"] == "data_exfiltration" for finding in urlparse_payload["findings"])
+
+    requests_repo = tmp_path / "requests-get"
+    requests_repo.mkdir()
+    write(requests_repo / "app.py", "import requests\nrequests.get('https://example.com')\n")
+
+    requests_result = run_audit(requests_repo, tmp_path)
+    assert requests_result.returncode == 0, requests_result.stderr
+    requests_payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert any(finding["rule"] == "network_client_usage" for finding in requests_payload["findings"])
 
 
 def test_markdown_documentation_does_not_create_production_blockers(tmp_path):
@@ -670,6 +702,21 @@ subprocess.run("echo hi", shell=True)
     assert any(finding["file"].endswith("README.md") for finding in payload["findings"])
 
 
+def test_documentation_findings_stay_visible_but_do_not_dominate_top_risks(tmp_path):
+    repo = tmp_path / "docs-top-risks"
+    repo.mkdir()
+    write(repo / "README.md", "This prose mentions subprocess.run(shell=True) for documentation.\n")
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert any(finding["file"].endswith("README.md") for finding in payload["findings"])
+    assert "README.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
+
+
 def test_review_required_report_uses_required_review_section(tmp_path):
     repo = tmp_path / "review-required"
     repo.mkdir()
@@ -686,6 +733,21 @@ def test_review_required_report_uses_required_review_section(tmp_path):
     assert "## Required Review" in report
     assert "## Production Blockers" not in report
     assert "No required review identified." not in report
+
+
+def test_documentation_only_findings_remain_in_json_but_not_top_risks(tmp_path):
+    repo = tmp_path / "docs-only"
+    repo.mkdir()
+    write(repo / "README.md", "Documentation mentioning subprocess.run(shell=True) as a note.\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert any(finding["file"].endswith("README.md") for finding in payload["findings"])
+    assert payload["summary"]["release_decision"] in {"READY_FOR_PRODUCTION", "REVIEW_REQUIRED"}
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "README.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
 
 
 def test_high_severity_medium_confidence_is_required_review_not_blocker(tmp_path):
@@ -716,6 +778,44 @@ def test_vendor_findings_do_not_create_production_blockers_by_default(tmp_path):
     payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
     assert all("vendor" not in finding["file"] for finding in payload["findings"])
     assert payload["summary"]["production_blockers"] == 0
+
+
+def test_standard_package_json_does_not_trigger_mcp_findings(tmp_path):
+    repo = tmp_path / "package"
+    repo.mkdir()
+    write(repo / "package.json", json.dumps({"name": "demo", "dependencies": {"react": "^18.0.0"}}))
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert not any(finding["category"] == "mcp_tool_abuse" for finding in payload["findings"])
+
+
+def test_actual_mcp_configuration_still_triggers_mcp_findings(tmp_path):
+    repo = tmp_path / "mcp-config"
+    repo.mkdir()
+    write(repo / "mcp.json", json.dumps({"mcpServers": {"helper": {"command": "node", "args": ["-e", "x"]}}}))
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert any(finding["category"] == "mcp_tool_abuse" for finding in payload["findings"])
+
+
+def test_repeated_findings_aggregate_into_single_summary_row(tmp_path):
+    repo = tmp_path / "repeated"
+    repo.mkdir()
+    for index in range(5):
+        write(repo / f"file{index}.py", "import os\nvalue = os.getenv('API_KEY')\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    env_findings = [finding for finding in payload["findings"] if finding["rule"] == "environment_variable_access"]
+    assert len(env_findings) == 1
 
 
 def test_readme_and_docs_prose_do_not_enter_top_risks(tmp_path):
@@ -915,8 +1015,8 @@ def test_markdown_limits_required_fixes_to_top_10(tmp_path):
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
     required_section = report.split("## Required Review", 1)[1].split("## Review Items", 1)[0]
     required_lines = [line for line in required_section.splitlines() if line.startswith("- UNSAFE_EXECUTION")]
-    assert len(required_lines) <= 10
-    assert "more in JSON" in required_section
+    assert len(required_lines) == 1
+    assert "more in JSON" not in required_section
 
 
 def test_markdown_aggregated_findings_groups_low_findings(tmp_path):
@@ -943,6 +1043,7 @@ def test_command_files_exist():
 def test_package_metadata_points_to_node_wrapper():
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     assert package["bin"]["repo-security-audit"] == "bin/repo-security-audit.js"
+    assert package["bin"]["trustboundary"] == "bin/repo-security-audit.js"
     assert "bin" in package["files"]
     assert "scripts" in package["files"]
     assert "commands" in package["files"]
@@ -1069,8 +1170,53 @@ def test_run_audit_continues_when_one_scanner_raises(tmp_path, monkeypatch):
     assert exit_code == 0
     payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
     assert payload["audit_warnings"]
+    assert payload["summary"]["release_decision"] == "REVIEW_REQUIRED"
     assert payload["summary"]["scanner_failures"] == 1
     assert any(warning["scanner"] == "scan_dependencies" for warning in payload["audit_warnings"])
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
     assert "Audit Warnings" in report
     assert "scanner_failed" in report
+
+
+def test_cli_supports_scan_subcommand(tmp_path):
+    repo = tmp_path / "scan-subcommand"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    result = run_audit_cli(repo, tmp_path, "scan")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["release_decision"] == "READY_FOR_PRODUCTION"
+
+
+def test_trustboundary_config_and_ignore_patterns_adjust_scope(tmp_path):
+    repo = tmp_path / "config"
+    repo.mkdir()
+    write(
+        repo / ".trustboundaryignore",
+        "ignored/**\n",
+    )
+    write(
+        repo / "trustboundary.yml",
+        """ignore:
+  - config-ignored/**
+scope:
+  documentation:
+    - notes/**
+""",
+    )
+    write(repo / "ignored" / "bad.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+    write(repo / "config-ignored" / "also_bad.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+    write(repo / "notes" / "report.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    files = {finding["file"] for finding in payload["findings"]}
+    assert all("ignored/" not in file for file in files)
+    assert all("config-ignored/" not in file for file in files)
+    doc_finding = next(finding for finding in payload["findings"] if finding["file"].endswith("notes/report.py"))
+    assert "documentation" in doc_finding["scope_tags"]
+    assert doc_finding["production_blocker"] is False
