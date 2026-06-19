@@ -245,11 +245,13 @@ def iter_repo_files(repo_path, include_tests: bool = False, include_dependencies
     repo_root = Path(repo_path).resolve()
     if not ignore_patterns:
         config = load_trustboundary_config(repo_root)
-        ignore_patterns = tuple({
-            *load_ignore_patterns(repo_root),
-            *config.exclusions,
-            *config.ignore_patterns,
-        })
+        merged_patterns: list[str] = []
+        seen_patterns: set[str] = set()
+        for pattern in (*load_ignore_patterns(repo_root), *config.exclusions, *config.ignore_patterns):
+            if pattern and pattern not in seen_patterns:
+                merged_patterns.append(pattern)
+                seen_patterns.add(pattern)
+        ignore_patterns = tuple(merged_patterns)
     skip_dirs = set(DEFAULT_SKIP_DIRS)
     if extra_skip_dirs:
         skip_dirs |= set(extra_skip_dirs)
