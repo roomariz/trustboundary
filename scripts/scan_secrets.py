@@ -31,7 +31,7 @@ def context_discount(path: str) -> int:
 
 def scan_file(path: str, findings: list):
     try:
-        with open(path, "r", errors="ignore") as f:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
     except Exception:
         return
