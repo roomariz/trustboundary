@@ -1,0 +1,17 @@
+{
+  "name": "trustboundary",
+  "version": "1.0.0",
+  "description": "Trustboundary security scanner skill bundle for Codex.",
+  "interface": {
+    "displayName": "Trustboundary",
+    "shortDescription": "Audit repos for security risks",
+    "longDescription": "Scans a repository for secrets, unsafe execution, malicious dependencies, prompt injection, exfiltration, and MCP/tool abuse.",
+    "category": "Security",
+    "capabilities": ["Instructions"],
+    "defaultPrompt": [
+      "Use trustboundary for this task.",
+      "Audit this repository for security risks."
+    ]
+  },
+  "skills": "./skills"
+}

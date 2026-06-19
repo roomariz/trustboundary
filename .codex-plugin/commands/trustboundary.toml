@@ -1,0 +1,2 @@
+description = "Audit a repository for security risks, secrets, malicious dependencies, prompt injection, and MCP/tool abuse"
+prompt = "Audit the entire repository for security risks only, not over-engineering. Scan the whole tree, not a diff. One line per finding, ranked by severity first. Call out secrets, dependency confusion, malicious packages, unsafe execution, exfiltration, prompt injection, insecure config, and MCP/tool abuse. End with a short remediation list. If nothing is found: 'No security findings. Ship.'"
