@@ -221,6 +221,33 @@ def _finding_evidence_summary(finding):
     }
 
 
+def _path_classes(finding):
+    source_class = None
+    sink_class = None
+    if finding["category"] == "prompt_injection" or finding["rule"] in {"raw_prompt_concatenation", "direct_user_input_in_prompt", "missing_instruction_separation", "unsafe_prompt_construction"}:
+        source_class = "prompt"
+    elif finding["rule"] in {"environment_variable_access", "credential_env_passthrough"}:
+        source_class = "environment"
+    elif finding["rule"] in {"filesystem_read_access", "recursive_filesystem_operation"}:
+        source_class = "file"
+    elif finding["category"] == "data_exfiltration":
+        source_class = "retrieval"
+    elif finding["category"] == "mcp_tool_abuse":
+        source_class = "tool"
+
+    if finding["rule"] in {"shell_true", "exec_call", "os_system", "child_process_exec", "string_concat_into_shell"}:
+        sink_class = "execution"
+    elif finding["rule"] in {"filesystem_write_access", "filesystem_delete_access"} or finding["category"] == "framework_security" and finding["rule"] in {"missing_tenant_filters", "unsafe_state_mutation"}:
+        sink_class = "filesystem"
+    elif finding["category"] == "data_exfiltration":
+        sink_class = "network"
+    elif finding["category"] == "leaked_secrets" or finding["rule"] == "high_entropy_literal":
+        sink_class = "credential"
+    elif finding["category"] == "mcp_tool_abuse":
+        sink_class = "tool"
+    return source_class, sink_class
+
+
 def score_findings(raw_findings, include_dependencies: bool = False, include_tests: bool = False, repo_config=None):
     score_module = load_module("score")
     scored = score_module.score_findings(raw_findings, include_dependencies=include_dependencies, include_tests=include_tests)
@@ -422,39 +449,73 @@ def top_risks(findings, repo_config=None):
 
 def trust_paths(findings):
     sources = {
-        "user_input": [f for f in findings if f["category"] == "prompt_injection" or f["rule"] in {"raw_prompt_concatenation", "direct_user_input_in_prompt", "missing_instruction_separation"}],
-        "prompt_input": [f for f in findings if f["category"] == "prompt_injection"],
-        "environment_variable": [f for f in findings if f["rule"] in {"environment_variable_access", "credential_env_passthrough"}],
-        "file_input": [f for f in findings if f["rule"] in {"filesystem_read_access", "recursive_filesystem_operation"}],
-        "retrieval_output": [f for f in findings if f["category"] == "data_exfiltration"],
-        "mcp_input": [f for f in findings if f["category"] == "mcp_tool_abuse"],
+        "prompt": [f for f in findings if _path_classes(f)[0] == "prompt"],
+        "environment": [f for f in findings if _path_classes(f)[0] == "environment"],
+        "file": [f for f in findings if _path_classes(f)[0] == "file"],
+        "retrieval": [f for f in findings if _path_classes(f)[0] == "retrieval"],
+        "tool": [f for f in findings if _path_classes(f)[0] == "tool"],
     }
     sinks = {
-        "subprocess": [f for f in findings if f["rule"] in {"shell_true", "exec_call", "os_system", "child_process_exec", "string_concat_into_shell"}],
-        "filesystem": [f for f in findings if f["rule"] in {"filesystem_write_access", "filesystem_delete_access"} or f["category"] == "framework_security" and f["rule"] in {"missing_tenant_filters", "unsafe_state_mutation"}],
-        "network": [f for f in findings if f["category"] == "data_exfiltration"],
-        "credentials": [f for f in findings if f["category"] == "leaked_secrets"],
+        "execution": [f for f in findings if _path_classes(f)[1] == "execution"],
+        "filesystem": [f for f in findings if _path_classes(f)[1] == "filesystem"],
+        "network": [f for f in findings if _path_classes(f)[1] == "network"],
+        "credential": [f for f in findings if _path_classes(f)[1] == "credential"],
+        "tool": [f for f in findings if _path_classes(f)[1] == "tool"],
+    }
+    path_source_labels = {
+        "prompt": "Prompt Input",
+        "environment": "Environment Variable",
+        "file": "File Input",
+        "retrieval": "Retrieval Output",
+        "tool": "MCP Tool Input",
+    }
+    path_sink_labels = {
+        "execution": "Execution Sink",
+        "filesystem": "Filesystem Sink",
+        "network": "Network Sink",
+        "credential": "Credential Sink",
+        "tool": "Tool Sink",
     }
     paths = []
-    combos = [
-        ("User Input", "subprocess(shell=True)", "High", "User input can reach shell execution through unsafe execution patterns.", "user_input", "subprocess"),
-        ("Prompt Input", "filesystem write", "Medium", "Prompt-controlled data can reach filesystem writes or state mutation.", "prompt_input", "filesystem"),
-        ("Environment Variable", "outbound request", "Medium", "Environment values can flow into network requests or exfiltration sinks.", "environment_variable", "network"),
-        ("Retrieval Output", "network request", "High", "Retrieved data can be reused in outbound requests.", "retrieval_output", "network"),
-        ("MCP Input", "filesystem write", "Medium", "Tool-controlled input can reach filesystem writes.", "mcp_input", "filesystem"),
-        ("File Input", "subprocess", "Medium", "File-controlled data may be reused in execution paths.", "file_input", "subprocess"),
+    class_pairs = [
+        ("prompt", "execution", "High", "Prompt data can reach command execution."),
+        ("prompt", "filesystem", "Medium", "Prompt data can reach filesystem mutation."),
+        ("prompt", "network", "High", "Prompt data can reach outbound requests."),
+        ("environment", "execution", "Medium", "Environment values can influence execution paths."),
+        ("environment", "network", "Medium", "Environment values can flow into outbound requests."),
+        ("file", "execution", "Medium", "File-controlled data can reach execution sinks."),
+        ("file", "network", "Medium", "File-controlled data can reach outbound requests."),
+        ("retrieval", "network", "High", "Retrieved content can be reused in network requests."),
+        ("tool", "execution", "High", "Tool-originated input can reach execution sinks."),
+        ("tool", "filesystem", "Medium", "Tool-originated input can reach filesystem mutation."),
+        ("tool", "credential", "High", "Tool-originated input can reach credential exposure."),
     ]
-    for source_label, sink_label, risk, summary, source_key, sink_key in combos:
-        if sources.get(source_key) and sinks.get(sink_key):
-            paths.append({
-                "path_type": "source_to_sink",
-                "source": source_label,
-                "sink": sink_label,
-                "risk": risk,
-                "confidence": "Medium",
-                "evidence": [sources[source_key][0]["id"], sinks[sink_key][0]["id"]],
-                "data_flow_summary": summary,
-            })
+    for source_key, sink_key, risk, summary in class_pairs:
+        source_items = sources.get(source_key) or []
+        sink_items = sinks.get(sink_key) or []
+        if not source_items or not sink_items:
+            continue
+        same_file = any(src.get("file") and src.get("file") == sink.get("file") for src in source_items for sink in sink_items)
+        cross_file = any((src.get("file") or "") != (sink.get("file") or "") for src in source_items for sink in sink_items)
+        evidence = [source_items[0]["id"], sink_items[0]["id"]]
+        confidence = "High" if same_file else "Medium" if cross_file else "Low"
+        reason = summary
+        if same_file:
+            reason += " Source and sink findings appear in the same file."
+        elif cross_file:
+            reason += " Source and sink findings span multiple files."
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if same_file else "cross_file",
+            "source": path_source_labels[source_key],
+            "source_class": source_key,
+            "sink": path_sink_labels[sink_key],
+            "sink_class": sink_key,
+            "risk": risk,
+            "confidence": confidence,
+            "evidence": evidence,
+            "data_flow_summary": reason,
+        })
     if any(f["category"] == "framework_security" for f in findings):
         paths.append({
             "path_type": "source_to_sink",
@@ -470,21 +531,44 @@ def trust_paths(findings):
 
 def attack_chains(trust_paths_items):
     chains = []
-    has_prompt = any(path["source"] == "Prompt Input" for path in trust_paths_items)
-    has_tool = any(path["source"] == "MCP Input" or path["sink"] == "filesystem write" for path in trust_paths_items)
-    has_shell = any("subprocess" in path["sink"] for path in trust_paths_items)
-    has_network = any(path["sink"] == "network request" or path["sink"] == "outbound request" for path in trust_paths_items)
-    if has_prompt and has_tool and has_shell and has_network:
+    source_classes = {path.get("source_class") for path in trust_paths_items if path.get("source_class")}
+    sink_classes = {path.get("sink_class") for path in trust_paths_items if path.get("sink_class")}
+
+    def has_source(source):
+        return source in source_classes
+
+    def has_sink(sink):
+        return sink in sink_classes
+
+    if has_source("prompt") and has_sink("execution") and has_sink("network") and (has_sink("tool") or has_sink("filesystem")):
         chains.append({
-            "name": "Prompt -> Tool -> Shell -> Network",
+            "name": "Prompt -> Tool -> Execution -> Network",
             "risk": "Critical",
-            "reason": "Prompt-controlled data reaches command execution and outbound communication.",
+            "reason": "Prompt-controlled input can reach tool execution and then outbound communication.",
         })
-    elif has_prompt and has_shell:
+    if has_source("prompt") and has_sink("execution"):
         chains.append({
-            "name": "Prompt -> Shell",
+            "name": "Prompt -> Execution",
             "risk": "High",
-            "reason": "Prompt-controlled data reaches shell execution.",
+            "reason": "Prompt-controlled input can reach execution sinks.",
+        })
+    if has_source("prompt") and has_sink("credential") or has_source("tool") and has_sink("credential"):
+        chains.append({
+            "name": "Prompt -> Credential",
+            "risk": "Critical",
+            "reason": "Prompt-controlled input can reach credential exposure.",
+        })
+    if has_source("retrieval") and has_sink("network"):
+        chains.append({
+            "name": "Retrieval -> Network",
+            "risk": "High",
+            "reason": "Retrieved content can flow into outbound requests.",
+        })
+    if has_source("tool") and has_sink("filesystem") and has_sink("execution"):
+        chains.append({
+            "name": "Tool -> Filesystem -> Execution",
+            "risk": "High",
+            "reason": "Tool-originated input can touch files and later influence execution.",
         })
     return chains
 

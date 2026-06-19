@@ -68,6 +68,10 @@ SEVERITY_BY_RULE = {
 LOW_CONTEXT_TAGS = ["test", "fixture", "example", "sample", "mock"]
 AGGREGATED_RULES = {"environment_variable_access", "unpinned_version", "high_entropy_literal"}
 AGGREGATED_CATEGORIES = {"supply_chain", "insecure_config"}
+HIGH_RISK_PATH_MARKERS = ("secret", "credential", "token", "key", "passwd", "shadow", ".env", "private")
+NETWORK_RISK_MARKERS = ("webhook", "callback", "http://", "https://", "url", "endpoint")
+EXECUTION_RISK_MARKERS = ("shell", "subprocess", "exec", "eval", "system")
+MCP_RISK_MARKERS = ("mcp", "skill", "tool", "allowed-tools")
 
 
 def confidence_level(score):
@@ -91,12 +95,41 @@ def confidence_bucket(score):
 def adjust_confidence(finding):
     score = finding.get("base_confidence", 40)
     path = (finding.get("file") or "").lower()
+    evidence = (finding.get("evidence_redacted") or finding.get("evidence") or "").lower()
+    scope_tags = set(finding.get("scope_tags") or [])
     if any(tag in path for tag in LOW_CONTEXT_TAGS):
         score -= 30
     if finding.get("rule") == "high_entropy_literal":
         score = min(score, 24)
     if finding.get("rule") == "environment_variable_access":
         score = min(score, 45)
+    if finding.get("category") == "prompt_injection":
+        score = min(score, 70)
+    if finding.get("rule") == "filesystem_read_access":
+        if any(marker in path or marker in evidence for marker in HIGH_RISK_PATH_MARKERS):
+            score += 20
+        elif any(marker in path or marker in evidence for marker in ("config", "settings", "readme", "docs")):
+            score -= 10
+        else:
+            score -= 5
+    if finding.get("rule") == "high_entropy_literal":
+        score = min(score, 24)
+    if finding.get("category") == "insecure_config":
+        if any(marker in path or marker in evidence for marker in ("debug", "tls", "cors", "credential", "default")):
+            score += 10
+    if finding.get("category") == "data_exfiltration":
+        if any(marker in path or marker in evidence for marker in NETWORK_RISK_MARKERS):
+            score += 10
+    if finding.get("category") == "unsafe_execution":
+        if any(marker in path or marker in evidence for marker in EXECUTION_RISK_MARKERS):
+            score += 10
+    if finding.get("category") == "mcp_tool_abuse":
+        if any(marker in path or marker in evidence for marker in MCP_RISK_MARKERS):
+            score += 10
+    if "documentation" in scope_tags:
+        score = min(score, 55 if finding.get("category") == "leaked_secrets" else 40)
+    if "generated" in scope_tags:
+        score = min(score, 45 if finding.get("category") == "leaked_secrets" else 35)
     if finding.get("category") == "prompt_injection":
         score = min(score, 70)
     return max(0, min(100, score))
@@ -107,6 +140,7 @@ def severity_for_finding(finding):
     confidence = finding.get("base_confidence", 40)
     path = (finding.get("file") or "").lower()
     evidence = (finding.get("evidence_redacted") or finding.get("evidence") or "").lower()
+    scope_tags = set(finding.get("scope_tags") or [])
 
     if finding["rule"] == "high_entropy_literal":
         return "Low" if confidence <= 24 else severity
@@ -120,6 +154,32 @@ def severity_for_finding(finding):
         if any(marker in path or marker in evidence for marker in ("user", "input", "args", "request", "query", "param", "filename", "filepath")):
             return "Medium"
         return "Low"
+
+    if finding["rule"] == "environment_variable_access":
+        if any(marker in path or marker in evidence for marker in ("key", "token", "secret", "credential", "password")):
+            return "Medium"
+        return "Low"
+
+    if finding["category"] == "insecure_config":
+        if any(marker in path or marker in evidence for marker in ("tls", "debug", "cors", "credential", "default")):
+            return "High"
+        return "Medium"
+
+    if finding["category"] == "data_exfiltration":
+        if any(marker in path or marker in evidence for marker in ("webhook", "callback", "token", "credential", "secret")):
+            return "High"
+        return "Medium"
+
+    if finding["category"] == "mcp_tool_abuse":
+        if finding["rule"] in {"suspicious_mcp_tool_description", "dynamic_context_pre_review_exec"}:
+            return "Critical" if finding["rule"] == "suspicious_mcp_tool_description" else "High"
+        return "High" if any(tag in scope_tags for tag in {"agent", "mcp"}) else severity
+
+    if finding["category"] == "unsafe_execution":
+        if finding["rule"] in {"shell_true", "eval_on_dynamic_input", "string_concat_into_shell"}:
+            return "High"
+        if finding["rule"] in {"exec_call", "os_system", "child_process_exec"}:
+            return "Medium"
 
     return severity
 
