@@ -297,10 +297,11 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
 
     payload = json.loads(findings_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 2
-    assert payload["summary"]["release_decision"] == "NOT_READY_FOR_PRODUCTION"
-    assert payload["summary"]["production_blockers"] >= 1
+    assert payload["summary"]["release_decision"] == "REVIEW_REQUIRED"
+    assert payload["summary"]["production_blockers"] == 0
     assert "attack_surface" in payload
     assert "trust_paths" in payload
+    assert "top_risks" in payload
     assert set(payload["trust_boundary"]) == {
         "filesystem_access",
         "network_access",
@@ -321,29 +322,28 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
     assert all("trust_boundary" in finding for finding in payload["findings"])
     assert all("production_blocker" in finding for finding in payload["findings"])
     assert all("confidence_level" in finding for finding in payload["findings"])
-    assert all("evidence_count" in finding for finding in payload["findings"])
-    assert all("evidence_locations" in finding for finding in payload["findings"])
+    assert all("rule_id" in finding for finding in payload["findings"])
+    assert all("evidence_snippet" in finding for finding in payload["findings"])
     assert all("remediation_priority" in finding for finding in payload["findings"])
-    assert any(finding["production_blocker"] for finding in payload["findings"])
+    assert not any(finding["production_blocker"] for finding in payload["findings"])
 
     report = report_path.read_text(encoding="utf-8")
     assert "Executive Summary" in report
-    assert "Trust Boundary Profile" in report
+    assert "Release Decision" in report
+    assert "Top Risks" in report
+    assert "Trust Boundary Assessment" in report
+    assert "Production Blockers" in report
+    assert "Review Items" in report
+    assert "Aggregated Findings" in report
     assert "Filesystem Access" in report
     assert "Network Access" in report
     assert "Environment Access" in report
     assert "Execution Access" in report
-    assert "Risk Counts by Severity" in report
-    assert "Production Readiness Assessment" in report
-    assert "Release Decision" in report
-    assert "Required Fixes" in report
-    assert "Recommended Fixes" in report
     assert "Attack Surface Summary" in report
-    assert "Trust Paths" in report
     assert "Scan Scope" in report
     assert "Excluded Paths" in report
     assert "Full finding details are available in `security-audit-findings.json`." in report
-    assert "Limitations of Regex/Static Scanning" in report
+    assert "Limitations" in report
 
 
 def test_installed_cli_flow_creates_audit_outputs_and_succeeds_with_findings(tmp_path):
@@ -375,14 +375,13 @@ subprocess.run("echo hi", shell=True)
     payload = json.loads(findings_path.read_text(encoding="utf-8"))
     assert payload["findings"]
     assert any(finding["rule"] == "shell_true" for finding in payload["findings"])
-    assert payload["summary"]["release_decision"] == "NOT_READY_FOR_PRODUCTION"
+    assert payload["summary"]["release_decision"] == "READY_FOR_PRODUCTION"
     assert all(finding["confidence_level"] in {"LOW", "MEDIUM", "HIGH"} for finding in payload["findings"])
 
     report = report_path.read_text(encoding="utf-8")
     assert "Executive Summary" in report
-    assert "Trust Boundary Profile" in report
-    assert "Risk Counts by Severity" in report
-    assert "Production Readiness Assessment" in report
+    assert "Trust Boundary Assessment" in report
+    assert "Top Risks" in report
     assert "Scan Scope" in report
     assert "Limitations" in report
 
@@ -408,8 +407,7 @@ def test_audit_marks_clean_repo_ready_for_production(tmp_path):
     assert payload["attack_surface"]["high_risk_paths"] == 0
 
     report = report_path.read_text(encoding="utf-8")
-    assert "Trust Boundary Profile" in report
-    assert "Production Readiness Assessment" in report
+    assert "Trust Boundary Assessment" in report
     assert "Release Decision" in report
     assert "READY_FOR_PRODUCTION" in report
 
@@ -445,7 +443,7 @@ def test_fastapi_fixture_differentiates_safe_and_unsafe_routes(tmp_path):
     assert unsafe_result.returncode == 0, unsafe_result.stderr
     unsafe_payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
     unsafe_rules = {finding["rule"] for finding in unsafe_payload["findings"]}
-    assert unsafe_payload["summary"]["release_decision"] == "NOT_READY_FOR_PRODUCTION"
+    assert unsafe_payload["summary"]["release_decision"] == "REVIEW_REQUIRED"
     assert "unauthenticated_route" in unsafe_rules
     assert "unrestricted_admin_endpoint" in unsafe_rules
     assert "unsafe_prompt_construction" in unsafe_rules
@@ -488,6 +486,77 @@ def test_supabase_fixture_differentiates_safe_and_unsafe_tenant_scoping(tmp_path
     assert safe_payload["summary"]["release_decision"] in {"READY_FOR_PRODUCTION", "REVIEW_REQUIRED"}
     assert "service_role_key_exposure" not in safe_rules
     assert not any(finding["severity"] == "High" and finding["rule"] == "missing_tenant_filters" for finding in safe_payload["findings"])
+
+
+def test_duplicate_findings_aggregate_and_top_risks_are_capped(tmp_path):
+    repo = tmp_path / "aggregate"
+    repo.mkdir()
+    for index in range(12):
+        write(repo / f"file{index}.py", "import os\nvalue = os.getenv('API_KEY')\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    env_findings = [finding for finding in payload["findings"] if finding["rule"] == "environment_variable_access"]
+    assert len(env_findings) == 1
+    assert env_findings[0]["occurrences"] >= 12
+    assert env_findings[0]["files_affected"] >= 12
+    assert len(payload["top_risks"]) <= 10
+
+
+def test_supply_chain_findings_aggregate(tmp_path):
+    repo = tmp_path / "supply"
+    repo.mkdir()
+    write(
+        repo / "package.json",
+        json.dumps({"dependencies": {"left-pad": "^1.0.0", "lodash": "latest"}, "scripts": {"postinstall": "echo hi"}}),
+    )
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    unpinned = [finding for finding in payload["findings"] if finding["rule"] == "unpinned_version"]
+    assert len(unpinned) == 1
+    assert unpinned[0]["occurrences"] == 2
+    assert unpinned[0]["files_affected"] == 1
+
+
+def test_trust_paths_only_appear_when_supported(tmp_path):
+    repo = tmp_path / "trust-paths"
+    repo.mkdir()
+    write(repo / "app.py", "print('hello')\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["trust_paths"] == []
+
+
+def test_entropy_only_findings_do_not_block_production(tmp_path):
+    repo = tmp_path / "entropy"
+    repo.mkdir()
+    write(repo / "app.py", 'token = "A" * 32\n')
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert all(finding["rule"] != "high_entropy_literal" or not finding["production_blocker"] for finding in payload["findings"])
+
+
+def test_report_evidence_snippets_include_file_and_line(tmp_path):
+    repo = tmp_path / "evidence"
+    repo.mkdir()
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert all(":" in finding["evidence_snippet"] for finding in payload["findings"])
 
 
 def test_audit_skips_large_binary_and_non_repo_paths(tmp_path):
@@ -695,7 +764,7 @@ def test_release_decision_line_uses_expected_status_type(tmp_path):
     result = run_audit_cli(repo, tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert "x Release Decision: NOT_READY_FOR_PRODUCTION" in result.stdout
+    assert "✓ Release Decision: READY_FOR_PRODUCTION" in result.stdout
 
 
 def test_markdown_limits_required_fixes_to_top_10(tmp_path):
@@ -708,7 +777,7 @@ def test_markdown_limits_required_fixes_to_top_10(tmp_path):
 
     assert result.returncode == 0, result.stderr
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
-    required_section = report.split("## Required Fixes", 1)[1].split("## Recommended Fixes", 1)[0]
+    required_section = report.split("## Production Blockers", 1)[1].split("## Review Items", 1)[0]
     required_lines = [line for line in required_section.splitlines() if line.startswith("- UNSAFE_EXECUTION")]
     assert len(required_lines) <= 10
     assert "more in JSON" in required_section

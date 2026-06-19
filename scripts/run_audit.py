@@ -103,6 +103,7 @@ RULE_RECOMMENDATIONS = {
 
 SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 BLOCKING_SEVERITIES = {"Critical", "High"}
+BLOCKING_CONFIDENCE = "HIGH"
 REMEDIATION_PRIORITY = {"Critical": "REQUIRED", "High": "REQUIRED", "Medium": "RECOMMENDED", "Low": "OPTIONAL", "Info": "OPTIONAL"}
 ICON_SUCCESS = "✓"
 ICON_WARNING = "!"
@@ -163,44 +164,29 @@ def emit(message: str, quiet: bool = False):
 
 def score_findings(raw_findings, include_dependencies: bool = False, include_tests: bool = False):
     score_module = load_module("score")
-    scored = []
-    counter = 1
-    for finding in raw_findings:
-        confidence = score_module.adjust_confidence(finding)
-        severity = score_module.SEVERITY_BY_RULE.get(finding["rule"], "Medium")
+    scored = score_module.score_findings(raw_findings, include_dependencies=include_dependencies, include_tests=include_tests)
+    findings = []
+    for finding in scored["findings"]:
         metadata = CATEGORY_METADATA.get(finding["category"], {})
-        evidence_locations = finding.get("evidence_locations") or [{"file": finding.get("file"), "line": finding.get("line")}]
-        evidence_count = finding.get("evidence_count") or len([item for item in evidence_locations if item.get("file")])
         path = Path(finding.get("file") or "")
-        production_blocker = severity in BLOCKING_SEVERITIES
+        production_blocker = finding["severity"] in BLOCKING_SEVERITIES and finding["confidence_level"] == BLOCKING_CONFIDENCE
+        if finding["rule"] == "high_entropy_literal":
+            production_blocker = False
         if path.suffix.lower() in {".md", ".txt", ".rst"} and finding["category"] != "leaked_secrets":
             production_blocker = False
         if is_test_path(path) and not include_tests:
             production_blocker = False
         if is_dependency_path(path) and not include_dependencies:
             production_blocker = False
-        scored.append({
-            "id": f"{finding['category'].upper()}-{counter:04d}",
-            "category": finding["category"],
-            "rule": finding["rule"],
-            "severity": severity,
-            "confidence": confidence,
-            "confidence_bucket": score_module.confidence_bucket(confidence),
-            "file": finding.get("file"),
-            "line": finding.get("line"),
-            "evidence_redacted": finding.get("evidence_redacted"),
-            "evidence_count": evidence_count,
-            "evidence_locations": evidence_locations,
-            "confidence_level": score_module.confidence_level(confidence),
+        findings.append({
+            **finding,
             "impact": metadata.get("impact", "Review the finding and validate whether it is a real risk."),
             "recommendation": RULE_RECOMMENDATIONS.get(finding["rule"], metadata.get("recommendation", "Review the flagged code or configuration and reduce the risky pattern.")),
-            "remediation_priority": REMEDIATION_PRIORITY.get(severity, "RECOMMENDED"),
+            "remediation_priority": REMEDIATION_PRIORITY.get(finding["severity"], "RECOMMENDED"),
             "trust_boundary": metadata.get("trust_boundary", ["unknown"]),
             "production_blocker": production_blocker,
-            "status": "open",
         })
-        counter += 1
-    return {"findings": scored, "correlations": score_module.correlate(scored)}
+    return {"findings": findings, "correlations": scored["correlations"]}
 
 
 def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool = False, include_tests: bool = False, include_env_files: bool = False, colour_enabled: bool = False, use_icons: bool = True):
@@ -264,21 +250,11 @@ def posture_label(counts):
 
 
 def release_decision(findings):
-    if any(f.get("severity") == "Critical" for f in findings):
+    if any(f.get("severity") in BLOCKING_SEVERITIES and f.get("confidence_level") == BLOCKING_CONFIDENCE and f.get("production_blocker") for f in findings):
         return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("rule") == "aws_access_key_id" for f in findings):
-        return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("category") == "prompt_injection" and f.get("severity") == "High" for f in findings):
-        return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("category") == "unsafe_execution" and f.get("severity") == "High" for f in findings):
-        return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("rule") == "missing_tenant_filters" and f.get("severity") == "High" for f in findings):
-        return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("rule") == "unrestricted_tools" and f.get("severity") == "High" for f in findings):
-        return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("production_blocker") for f in findings):
-        return "NOT_READY_FOR_PRODUCTION"
-    if any(f.get("severity") == "High" for f in findings):
+    if any(f.get("severity") == "Medium" for f in findings):
+        return "REVIEW_REQUIRED"
+    if any(f.get("category") in {"prompt_injection", "mcp_tool_abuse", "data_exfiltration", "framework_security"} for f in findings):
         return "REVIEW_REQUIRED"
     return "READY_FOR_PRODUCTION"
 
@@ -315,31 +291,45 @@ def attack_surface_summary(findings):
     }
 
 
+def top_risks(findings):
+    return sorted(
+        findings,
+        key=lambda finding: (
+            SEVERITY_ORDER.get(finding["severity"], 9),
+            -int(finding.get("confidence", 0)),
+            -(finding.get("occurrences", 1)),
+            finding.get("file") or "",
+            finding.get("line") or 0,
+        ),
+    )[:10]
+
+
 def trust_paths(findings):
     paths = []
-    has_prompt = any(f["category"] == "prompt_injection" for f in findings)
-    has_tool = any(f["category"] == "mcp_tool_abuse" for f in findings)
-    has_exec = any(f["category"] == "unsafe_execution" for f in findings)
-    has_exfil = any(f["category"] == "data_exfiltration" for f in findings)
+    has_prompt = [f for f in findings if f["category"] == "prompt_injection"]
+    has_tool = [f for f in findings if f["category"] == "mcp_tool_abuse"]
+    has_exec = [f for f in findings if f["category"] == "unsafe_execution"]
+    has_exfil = [f for f in findings if f["category"] == "data_exfiltration"]
     if has_prompt and has_tool and has_exec:
         paths.append({
             "name": "Prompt-to-Shell",
-            "attack_path": ["User Input", "Prompt Construction", "Tool Invocation", "Shell Execution"],
-            "trust_path": ["User Input", "Prompt Template", "Validated Tool", "Restricted Execution"],
+            "evidence": [has_prompt[0]["id"], has_tool[0]["id"], has_exec[0]["id"]],
+            "confidence": "Medium",
             "data_flow_summary": "Untrusted input can move from prompt construction into a tool call and reach shell execution.",
         })
     if has_exfil:
         paths.append({
             "name": "Retrieval-to-External-Request",
-            "attack_path": ["User Input", "Retrieval Layer", "External Request"],
-            "trust_path": ["User Input", "Retrieval Guard", "Allowlisted Request"],
+            "evidence": [has_exfil[0]["id"]],
+            "confidence": "Medium",
             "data_flow_summary": "Repository code may pass retrieved or user-controlled data into outbound requests.",
         })
-    if any(f["category"] == "framework_security" for f in findings):
+    framework_findings = [f for f in findings if f["category"] == "framework_security"]
+    if framework_findings:
         paths.append({
             "name": "Framework Surface",
-            "attack_path": ["Framework Entry Point", "Missing Guard", "Sensitive Action"],
-            "trust_path": ["Framework Entry Point", "Auth / Validation", "Sensitive Action"],
+            "evidence": [framework_findings[0]["id"]],
+            "confidence": "Low",
             "data_flow_summary": "Framework-specific entry points may lack the expected authentication, tenant, or tool validation.",
         })
     return paths
@@ -379,24 +369,86 @@ def render_report(repo_path: Path, scored, scope_summary):
     required = required_fixes(findings)
     recommended = recommended_fixes(findings)
     framework_items = framework_findings(findings)
-    by_category = defaultdict(list)
-    for finding in findings:
-        by_category[finding["category"]].append(finding)
-
-    category_titles = {
-        "leaked_secrets": "Leaked Secrets",
-        "supply_chain": "Supply-Chain Risk",
-        "dependency_confusion": "Dependency Confusion",
-        "malicious_packages": "Malicious Packages",
-        "unsafe_execution": "Unsafe Execution",
-        "insecure_config": "Insecure Config",
-        "data_exfiltration": "Data Exfiltration",
-        "mcp_tool_abuse": "MCP / Tool Abuse",
-        "prompt_injection": "Prompt Injection",
-    }
+    risks = top_risks(findings)
 
     lines = [
         f"# Repo Security Audit - {repo_path.name or repo_path} - {datetime.now().date().isoformat()}",
+        "",
+        "## Executive Summary",
+        f"- Total findings: {len(findings)} (Critical: {counts['Critical']}, High: {counts['High']}, Medium: {counts['Medium']}, Low: {counts['Low']}, Info: {counts['Info']})",
+        f"- Overall posture: {posture_label(counts)}",
+        f"- Release decision: {decision}",
+        "- Network verification pass: skipped (offline scanner only)",
+        "",
+        "## Release Decision",
+        f"- {decision}",
+        f"- Reason: {'High severity + high confidence blocker found' if decision == 'NOT_READY_FOR_PRODUCTION' else 'Medium severity or unresolved trust-boundary risk present' if decision == 'REVIEW_REQUIRED' else 'No blockers or unresolved trust-boundary risks were found'}",
+        "",
+        "## Top Risks",
+    ]
+    if risks:
+        for index, finding in enumerate(risks, start=1):
+            lines.append(f"{index}. {finding['rule']} ({finding['severity']}, {finding['confidence_level']}) - {finding.get('evidence_snippet')}")
+    else:
+        lines.append("No risks identified.")
+
+    lines.extend([
+        "",
+        "## Trust Boundary Assessment",
+    ])
+    if paths:
+        for path in paths:
+            lines.extend([
+                f"- **{path['name']}**",
+                f"  - Evidence: {', '.join(path['evidence'])}",
+                f"  - Confidence: {path['confidence']}",
+                f"  - Data flow: {path['data_flow_summary']}",
+            ])
+    else:
+        lines.append("- No supported trust paths were inferred.")
+
+    lines.extend([
+        "",
+        "## Production Blockers",
+    ])
+    if required:
+        for finding in required[:10]:
+            lines.append(f"- {finding['id']} ({finding['severity']}, {finding['confidence_level']}) {finding['rule']} - {finding.get('recommendation')}")
+        if len(required) > 10:
+            lines.append(f"- ... and {len(required) - 10} more in JSON")
+    else:
+        lines.append("No production blockers identified.")
+
+    lines.extend([
+        "",
+        "## Review Items",
+    ])
+    if recommended:
+        for finding in recommended[:10]:
+            lines.append(f"- {finding['id']} ({finding['severity']}, {finding['confidence_level']}) {finding['rule']} - {finding.get('recommendation')}")
+    else:
+        lines.append("No review items identified.")
+
+    lines.extend([
+        "",
+        "## Aggregated Findings",
+    ])
+    for finding in findings:
+        lines.append(f"- {finding['id']} | {finding['rule_id']} | {finding['severity']} | {finding['confidence_level']} | {finding.get('occurrences', 1)} occurrence(s)")
+
+    lines.extend([
+        "",
+        "## Trust Boundary Profile",
+    ])
+    for key in ["filesystem_access", "network_access", "environment_access", "execution_access"]:
+        item = trust_profile[key]
+        lines.append(f"- {item['label']}: {item['finding_count']} finding(s), highest severity {item['highest_severity'] or '-'}, status {item['status']}")
+
+    lines.extend([
+        "",
+        "## Attack Surface Summary",
+        f"- Categories observed: {', '.join(sorted(attack_surface['findings_by_category'])) if attack_surface['findings_by_category'] else 'None'}",
+        f"- High risk paths: {attack_surface['high_risk_paths']}",
         "",
         "## Scan Scope",
         f"- Target: `{repo_path}`",
@@ -406,60 +458,17 @@ def render_report(repo_path: Path, scored, scope_summary):
         f"- Excluded directories: `{scope_summary['excluded_dir_count']}`",
         "",
         "## Excluded Paths",
-    ]
+    ])
     for item in scope_summary["excluded_directories"]:
         lines.append(f"- `{item}`")
-    lines.extend([
-        "",
-        "## Executive Summary",
-        f"- Total findings: {len(findings)} (Critical: {counts['Critical']}, High: {counts['High']}, Medium: {counts['Medium']}, Low: {counts['Low']}, Info: {counts['Info']})",
-        f"- Overall posture: {posture_label(counts)}",
-        f"- Release decision: {decision}",
-        "- Network verification pass: skipped (offline scanner only)",
-        "",
-        "## Trust Boundary Profile",
-    ])
-    for key in ["filesystem_access", "network_access", "environment_access", "execution_access"]:
-        item = trust_profile[key]
-        lines.append(
-            f"- {item['label']}: {item['finding_count']} finding(s), highest severity {item['highest_severity'] or '-'}, status {item['status']}"
-        )
 
     lines.extend([
-        "## Risk Counts by Severity",
-        f"- Critical: {counts['Critical']}",
-        f"- High: {counts['High']}",
-        f"- Medium: {counts['Medium']}",
-        f"- Low: {counts['Low']}",
-        f"- Info: {counts['Info']}",
         "",
-        "## Production Readiness Assessment",
-        f"- Production blockers: {sum(1 for finding in findings if finding.get('production_blocker'))}",
-        f"- Ready for production: {decision == 'READY_FOR_PRODUCTION'}",
-        f"- Review required: {decision == 'REVIEW_REQUIRED'}",
-        f"- Not ready for production: {decision == 'NOT_READY_FOR_PRODUCTION'}",
-        "",
-        "## Release Decision",
-        f"- {decision}",
-        "",
-        "## Attack Surface Summary",
-        f"- Categories observed: {', '.join(sorted(attack_surface['findings_by_category'])) if attack_surface['findings_by_category'] else 'None'}",
-        f"- High risk paths: {attack_surface['high_risk_paths']}",
-        "",
-        "## Trust Paths",
-    ])
-    if paths:
-        for path in paths:
-            lines.extend([
-                f"- **{path['name']}**",
-                f"  - Attack path: {' -> '.join(path['attack_path'])}",
-                f"  - Trust path: {' -> '.join(path['trust_path'])}",
-                f"  - Data flow: {path['data_flow_summary']}",
-            ])
-    else:
-        lines.append("- No multi-step trust paths were inferred.")
-
-    lines.extend([
+        "## Limitations",
+        "- This audit is heuristic and read-only.",
+        "- Regex patterns can miss context-sensitive bugs and can produce false positives.",
+        "- No network verification or live registry checking is performed.",
+        "- Findings should be treated as leads for human review, not as proof of compromise.",
         "",
         "## Framework-Specific Findings",
     ])
@@ -470,52 +479,16 @@ def render_report(repo_path: Path, scored, scope_summary):
         for framework_name in sorted(framework_groups):
             lines.append(f"### {framework_name}")
             for finding in framework_groups[framework_name]:
-                lines.append(f"- {finding['id']} ({finding['severity']}) {finding['rule']} - {finding.get('file') or '-'}")
+                lines.append(f"- {finding['id']} ({finding['severity']}, {finding['confidence_level']}) {finding['rule']} - {finding.get('file') or '-'}")
     else:
         lines.append("No framework-specific findings identified.")
-
-    lines.extend([
-        "",
-        "## Required Fixes",
-    ])
-    if required:
-        for finding in required[:10]:
-            lines.append(f"- {finding['id']} ({finding['severity']}) {finding['rule']} - {finding.get('recommendation')}")
-        if len(required) > 10:
-            lines.append(f"- ... and {len(required) - 10} more in JSON")
-    else:
-        lines.append("No required fixes identified.")
-
-    lines.extend([
-        "",
-        "## Recommended Fixes",
-    ])
-    if recommended:
-        for finding in recommended:
-            lines.append(f"- {finding['id']} ({finding['severity']}) {finding['rule']} - {finding.get('recommendation')}")
-    else:
-        lines.append("No recommended fixes identified.")
-
-    lines.extend([
-        "",
-        "## Findings",
-        "Full finding details are available in `security-audit-findings.json`.",
-    ])
-
-    lines.extend([
-        "",
-        "## Limitations of Regex/Static Scanning",
-        "- This audit is heuristic and read-only.",
-        "- Regex patterns can miss context-sensitive bugs and can produce false positives.",
-        "- No network verification or live registry checking is performed.",
-        "- Findings should be treated as leads for human review, not as proof of compromise.",
-    ])
 
     if scored["correlations"]:
         lines.extend(["", "## Cross-Category Correlations"])
         for correlation in scored["correlations"]:
             lines.append(f"- {correlation['note']} ({correlation['file']})")
 
+    lines.extend(["", "Full finding details are available in `security-audit-findings.json`."])
     return "\n".join(lines) + "\n"
 
 
@@ -548,6 +521,7 @@ def build_json_output(repo_path: Path, scored, scope_summary):
         },
         "scope": scope_summary,
         "trust_boundary": boundary_summary(findings),
+        "top_risks": top_risks(findings),
         "attack_surface": attack_surface_summary(findings),
         "trust_paths": trust_paths(findings),
         "framework_specific_findings": [
