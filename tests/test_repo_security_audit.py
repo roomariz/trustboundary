@@ -2068,6 +2068,162 @@ def test_readiness_state_not_ready_for_production_from_scanner_failure(tmp_path,
     assert any(item.startswith("scanner:") for item in readiness["blockers"])
 
 
+def test_active_risk_acceptance_marks_finding_and_reduces_pressure(tmp_path):
+    repo = tmp_path / "accepted"
+    repo.mkdir()
+    write(
+        repo / "trustboundary.yml",
+        """risk_acceptance:
+  - rule: shell_true
+    path: app.py
+    reason: Expected local execution path.
+    owner: Muhammad
+    expires: 2026-12-31
+""",
+    )
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    finding = next(f for f in payload["findings"] if f["rule"] == "shell_true")
+    assert finding["status"] == "accepted_risk"
+    assert payload["risk_acceptance"]["active"]
+    assert payload["summary"]["production_readiness"]["status"] in {"READY_WITH_REVIEW", "READY_FOR_PRODUCTION"}
+
+
+def test_critical_or_secret_finding_cannot_be_accepted_away(tmp_path):
+    repo = tmp_path / "cannot-accept"
+    repo.mkdir()
+    write(
+        repo / "trustboundary.yml",
+        """risk_acceptance:
+  - rule: private_key_block
+    path: secret.pem
+    reason: Exception
+    owner: Muhammad
+    expires: 2026-12-31
+  - rule: aws_secret_key_assignment
+    path: secret.py
+    reason: Exception
+    owner: Muhammad
+    expires: 2026-12-31
+""",
+    )
+    write(repo / "secret.pem", "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n")
+    write(repo / "secret.py", 'secret = "AKIA1234567890ABCDEF"\n')
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    secret_finding = next(f for f in payload["findings"] if f["rule"] in {"private_key_block", "aws_secret_key_assignment"})
+    assert secret_finding.get("status") != "accepted_risk"
+    assert payload["summary"]["production_readiness"]["status"] == "NOT_READY_FOR_PRODUCTION"
+
+
+def test_expired_risk_acceptance_does_not_apply(tmp_path):
+    repo = tmp_path / "expired-acceptance"
+    repo.mkdir()
+    write(
+        repo / "trustboundary.yml",
+        """risk_acceptance:
+  - rule: shell_true
+    path: app.py
+    reason: Past exception
+    owner: Muhammad
+    expires: 2000-01-01
+""",
+    )
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["risk_acceptance"]["expired"]
+    finding = next(f for f in payload["findings"] if f["rule"] == "shell_true")
+    assert finding.get("status") != "accepted_risk"
+
+
+def test_invalid_risk_acceptance_creates_audit_warning(tmp_path):
+    repo = tmp_path / "invalid-acceptance"
+    repo.mkdir()
+    write(
+        repo / "trustboundary.yml",
+        """risk_acceptance:
+  - rule: shell_true
+    path: app.py
+    owner: Muhammad
+    expires: 2026-12-31
+""",
+    )
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["risk_acceptance"]["invalid"]
+    assert any(warning["rule"] == "risk_acceptance_invalid" for warning in payload["audit_warnings"])
+
+
+def test_risk_acceptance_does_not_improve_trust_score_above_baseline(tmp_path):
+    baseline_repo = tmp_path / "baseline-risk"
+    baseline_repo.mkdir()
+    write(baseline_repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    accepted_repo = tmp_path / "accepted-risk"
+    accepted_repo.mkdir()
+    write(
+        accepted_repo / "trustboundary.yml",
+        """risk_acceptance:
+  - rule: shell_true
+    path: app.py
+    reason: Expected local execution path.
+    owner: Muhammad
+    expires: 2026-12-31
+""",
+    )
+    write(accepted_repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    (tmp_path / "baseline-out").mkdir()
+    (tmp_path / "accepted-out").mkdir()
+    baseline_result = run_audit(baseline_repo, tmp_path / "baseline-out")
+    accepted_result = run_audit(accepted_repo, tmp_path / "accepted-out")
+
+    assert baseline_result.returncode == 0, baseline_result.stderr
+    assert accepted_result.returncode == 0, accepted_result.stderr
+    baseline_payload = json.loads((tmp_path / "baseline-out" / "security-audit-findings.json").read_text(encoding="utf-8"))
+    accepted_payload = json.loads((tmp_path / "accepted-out" / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert accepted_payload["summary"]["trust_score"] <= baseline_payload["summary"]["trust_score"]
+
+
+def test_risk_acceptance_markdown_section_renders(tmp_path):
+    repo = tmp_path / "acceptance-md"
+    repo.mkdir()
+    write(
+        repo / "trustboundary.yml",
+        """risk_acceptance:
+  - rule: shell_true
+    path: app.py
+    reason: Expected local execution path.
+    owner: Muhammad
+    expires: 2026-12-31
+""",
+    )
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "## Risk Acceptance" in report
+    assert "Active accepted risks" in report
+    assert "Accepted findings count" in report
+
+
 def test_scan_skills_and_mcp_handles_json_list_and_malformed_config(tmp_path):
     scan_module = load_script_module("scan_skills_and_mcp")
     repo = tmp_path / "repo"

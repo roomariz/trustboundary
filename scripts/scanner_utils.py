@@ -112,6 +112,7 @@ class ScanConfig:
     ignore_patterns: tuple[str, ...] = ()
     scope_rules: dict[str, tuple[str, ...]] = field(default_factory=dict)
     suppressions: tuple[dict[str, Any], ...] = ()
+    risk_acceptance: tuple[dict[str, Any], ...] = ()
     report_options: dict[str, Any] = field(default_factory=dict)
 
 
@@ -159,7 +160,7 @@ def load_trustboundary_config(repo_path: Path) -> ScanConfig:
         indent = len(line) - len(line.lstrip(" "))
         if stripped.startswith("- ") and current_list is not None:
             value = stripped[2:]
-            if current_key == "suppressions":
+            if current_key in {"suppressions", "risk_acceptance"}:
                 current_item = {}
                 current_list.append(current_item)
                 if value and ":" in value:
@@ -172,7 +173,7 @@ def load_trustboundary_config(repo_path: Path) -> ScanConfig:
             current_key = stripped[:-1]
             current_scope = None
             current_item = None
-            if current_key in {"exclusions", "ignore", "enabled_scanners", "suppressions"}:
+            if current_key in {"exclusions", "ignore", "enabled_scanners", "suppressions", "risk_acceptance"}:
                 current_list = []
                 data[current_key] = current_list
             elif current_key in {"scope", "scopes", "classify"}:
@@ -189,7 +190,7 @@ def load_trustboundary_config(repo_path: Path) -> ScanConfig:
             if current_scope and indent >= 4 and stripped.startswith("- "):
                 data.setdefault("scope_rules", {}).setdefault(current_scope, []).append(_coerce_scalar(stripped[2:]))
                 continue
-        if current_key == "suppressions" and current_item is not None and ":" in line and indent >= 2:
+        if current_key in {"suppressions", "risk_acceptance"} and current_item is not None and ":" in line and indent >= 2:
             key, value = line.split(":", 1)
             current_item[key.strip()] = _coerce_scalar(value)
             continue
@@ -209,6 +210,7 @@ def load_trustboundary_config(repo_path: Path) -> ScanConfig:
     exclusions = tuple(str(item) for item in data.get("exclusions", []) if str(item))
     ignore_patterns = tuple(str(item) for item in data.get("ignore", []) if str(item))
     suppressions = tuple(item for item in data.get("suppressions", []) if isinstance(item, dict))
+    risk_acceptance = tuple(item for item in data.get("risk_acceptance", []) if isinstance(item, dict))
     enabled_scanners = tuple(str(item) for item in data.get("enabled_scanners", []) if str(item))
     severity_thresholds = data.get("severity_thresholds", {})
     report_options = data.get("report_options", {})
@@ -229,6 +231,7 @@ def load_trustboundary_config(repo_path: Path) -> ScanConfig:
         ignore_patterns=ignore_patterns,
         scope_rules=scope_rules,
         suppressions=suppressions,
+        risk_acceptance=risk_acceptance,
         report_options=report_options,
     )
 

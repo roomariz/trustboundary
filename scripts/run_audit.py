@@ -125,6 +125,7 @@ ICON_ERROR = "x"
 ICON_INFO = "i"
 
 SUPPRESSION_FIELDS = ("rule", "path", "reason", "author", "expires")
+RISK_ACCEPTANCE_FIELDS = ("rule", "path", "reason", "owner", "expires")
 
 ANSI_RESET = "\x1b[0m"
 ANSI_GREEN = "\x1b[32m"
@@ -222,6 +223,73 @@ def apply_suppressions(findings, suppressions):
             continue
         kept.append(finding)
     return kept, active, expired, ignored
+
+
+def _risk_acceptance_is_expired(risk_acceptance):
+    expires = risk_acceptance.get("expires")
+    expiry = _parse_date(str(expires)) if expires else None
+    return expiry is None or expiry < datetime.now().date()
+
+
+def _risk_acceptance_matches(finding, risk_acceptance):
+    rule = str(risk_acceptance.get("rule") or "")
+    path = str(risk_acceptance.get("path") or "")
+    finding_rule = finding.get("rule") or finding.get("rule_id")
+    if rule and rule != finding_rule:
+        return False
+    finding_path = str(finding.get("file") or "")
+    if path and not Path(finding_path).match(path):
+        return False
+    return True
+
+
+def apply_risk_acceptance(findings, risk_acceptances):
+    active = []
+    expired = []
+    invalid = []
+    accepted = []
+    for acceptance in risk_acceptances or ():
+        if not all(str(acceptance.get(field) or "").strip() for field in RISK_ACCEPTANCE_FIELDS):
+            invalid.append({**acceptance, "status": "invalid", "reason": acceptance.get("reason") or "Missing required risk acceptance fields"})
+            continue
+        bucket = expired if _risk_acceptance_is_expired(acceptance) else active
+        bucket.append({**acceptance, "status": "expired" if bucket is expired else "active"})
+
+    updated = []
+    for finding in findings:
+        matched = next((acceptance for acceptance in active if _risk_acceptance_matches(finding, acceptance)), None)
+        if matched and finding.get("severity") not in {"Critical"} and finding.get("category") != "leaked_secrets":
+            accepted_finding = dict(finding)
+            accepted_finding["status"] = "accepted_risk"
+            accepted_finding["accepted_risk"] = matched
+            accepted.append(accepted_finding)
+            updated.append(accepted_finding)
+            continue
+        updated.append(finding)
+    return updated, active, expired, invalid, accepted
+
+
+def risk_acceptance_state(findings, risk_acceptances):
+    updated, active, expired, invalid, accepted = apply_risk_acceptance(findings, risk_acceptances)
+    return {
+        "findings": updated,
+        "active": active,
+        "expired": expired,
+        "invalid": invalid,
+        "accepted_findings": accepted,
+    }
+
+
+def risk_acceptance_warnings(risk_acceptances):
+    warnings = []
+    for acceptance in risk_acceptances or ():
+        if not all(str(acceptance.get(field) or "").strip() for field in RISK_ACCEPTANCE_FIELDS):
+            warnings.append({
+                "rule": "risk_acceptance_invalid",
+                "message": "Invalid risk acceptance entry missing required fields.",
+                "entry": acceptance,
+            })
+    return warnings
 
 
 def _finding_evidence_summary(finding):
@@ -414,6 +482,8 @@ def is_documentation_finding(finding):
 
 def decision_inputs(findings):
     production_findings = [finding for finding in findings if not is_documentation_finding(finding)]
+    accepted = [finding for finding in production_findings if finding.get("status") == "accepted_risk" and finding.get("severity") != "Critical" and finding.get("category") != "leaked_secrets"]
+    production_findings = [finding for finding in production_findings if finding not in accepted]
     blockers = [
         finding
         for finding in production_findings
@@ -616,8 +686,9 @@ def production_readiness(findings, trust_paths_items, attack_chains_items, activ
         ]
 
     production_findings = [finding for finding in findings if not is_documentation_finding(finding) and (finding.get("scope") == "production" or "production" in set(finding.get("scope_tags", [])))]
-    blockers = [finding for finding in production_findings if finding.get("production_blocker") or finding.get("severity") == "Critical"]
-    review_items = [finding for finding in production_findings if finding not in blockers and finding.get("severity") in {"High", "Medium", "Low"}]
+    pressure_findings = [finding for finding in production_findings if not (finding.get("status") == "accepted_risk" and finding.get("severity") != "Critical" and finding.get("category") != "leaked_secrets")]
+    blockers = [finding for finding in pressure_findings if finding.get("production_blocker") or finding.get("severity") == "Critical"]
+    review_items = [finding for finding in pressure_findings if finding not in blockers and finding.get("severity") in {"High", "Medium", "Low"}]
     risky_paths = [path for path in trust_paths_items if path.get("risk") in {"High", "Critical"} and path.get("confidence") in {"High", "Medium"}]
     high_confidence_chains = [chain for chain in attack_chains_items if chain.get("confidence_score", 0) >= 90]
     unresolved_agentic_chains = [chain for chain in attack_chains_items if any("Agent" in boundary for boundary in chain.get("supporting_boundaries", [])) or "Agent" in chain.get("name", "")]
@@ -628,7 +699,7 @@ def production_readiness(findings, trust_paths_items, attack_chains_items, activ
     elif blockers or critical_expired_suppressions():
         status = "NOT_READY_FOR_PRODUCTION"
         reason = "Critical production risk remains unresolved."
-    elif any(finding.get("severity") == "High" for finding in production_findings) or high_confidence_chains or unresolved_agentic_chains or risky_paths:
+    elif any(finding.get("severity") == "High" for finding in pressure_findings) or high_confidence_chains or unresolved_agentic_chains or risky_paths:
         status = "REVIEW_REQUIRED"
         reason = "High-confidence production risk paths or chains still need review."
     elif review_items:
@@ -1420,6 +1491,8 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     findings = sorted(scored["findings"], key=severity_sort_key)
     unsuppressed_findings = list(findings)
     findings, active_suppressions, expired_suppressions, ignored_findings = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
+    risk_state = risk_acceptance_state(findings, getattr(repo_config, "risk_acceptance", ()))
+    findings = sorted(risk_state["findings"], key=severity_sort_key)
     counts = risk_counts(findings)
     decision = release_decision(findings, audit_warnings=audit_warnings)
     trust_profile = boundary_summary(findings)
@@ -1601,6 +1674,21 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
 
     lines.extend([
         "",
+        "## Risk Acceptance",
+        f"- Active accepted risks: {len(risk_state['active'])}",
+        f"- Expired acceptances: {len(risk_state['expired'])}",
+        f"- Invalid acceptances: {len(risk_state['invalid'])}",
+        f"- Accepted findings count: {len(risk_state['accepted_findings'])}",
+    ])
+    for acceptance in risk_state["active"][:10]:
+        lines.append(f"- {acceptance['rule']} | {acceptance['path']} | {acceptance['reason']} | {acceptance['owner']} | {acceptance['expires']}")
+    for acceptance in risk_state["expired"][:10]:
+        lines.append(f"- expired: {acceptance['rule']} | {acceptance['path']} | {acceptance['reason']} | {acceptance['owner']} | {acceptance['expires']}")
+    for acceptance in risk_state["invalid"][:10]:
+        lines.append(f"- invalid: {acceptance.get('rule', '-')} | {acceptance.get('path', '-')} | {acceptance.get('reason', '-')}")
+
+    lines.extend([
+        "",
         "## Aggregated Findings",
     ])
     high_critical = [f for f in findings if f["severity"] in {"Critical", "High"} and not is_documentation_finding(f)]
@@ -1696,6 +1784,8 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
     findings = list(scored["findings"])
     unsuppressed_findings = list(findings)
     findings, active_suppressions, expired_suppressions, ignored_findings = apply_suppressions(findings, getattr(repo_config, "suppressions", ()))
+    risk_state = risk_acceptance_state(findings, getattr(repo_config, "risk_acceptance", ()))
+    findings = list(risk_state["findings"])
     counts = risk_counts(findings)
     decision = release_decision(findings, audit_warnings=audit_warnings)
     surface = attack_surface_summary(findings)
@@ -1735,6 +1825,12 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
             "active": active_suppressions,
             "expired": expired_suppressions,
             "ignored_findings": ignored_findings,
+        },
+        "risk_acceptance": {
+            "active": risk_state["active"],
+            "expired": risk_state["expired"],
+            "invalid": risk_state["invalid"],
+            "accepted_findings": risk_state["accepted_findings"],
         },
         "scope": scope_summary,
         "trust_boundary": boundary_summary(findings),
@@ -1807,6 +1903,7 @@ def main(argv=None):
             ignore_patterns=ignore_patterns + tuple(repo_config.exclusions) + tuple(repo_config.ignore_patterns),
             config=repo_config,
         )
+        audit_warnings = list(audit_warnings or []) + risk_acceptance_warnings(getattr(repo_config, "risk_acceptance", ()))
         emit("Scoring findings...", args.quiet)
         scored = score_findings(raw_findings, args.include_dependencies, args.include_tests, repo_config=repo_config)
         scope_summary = {
