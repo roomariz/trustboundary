@@ -91,6 +91,46 @@ CATEGORY_METADATA = {
 SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 BLOCKING_SEVERITIES = {"Critical", "High"}
 REMEDIATION_PRIORITY = {"Critical": "REQUIRED", "High": "REQUIRED", "Medium": "RECOMMENDED", "Low": "OPTIONAL", "Info": "OPTIONAL"}
+ICON_SUCCESS = "✓"
+ICON_WARNING = "!"
+ICON_ERROR = "x"
+ICON_INFO = "i"
+
+ANSI_RESET = "\x1b[0m"
+ANSI_GREEN = "\x1b[32m"
+ANSI_YELLOW = "\x1b[33m"
+ANSI_RED = "\x1b[31m"
+ANSI_CYAN = "\x1b[36m"
+
+
+def supports_color(stream, no_colour: bool) -> bool:
+    return not no_colour and hasattr(stream, "isatty") and stream.isatty()
+
+
+def colourize(text: str, colour: str, enabled: bool) -> str:
+    return f"{colour}{text}{ANSI_RESET}" if enabled else text
+
+
+def icon_prefix(kind: str, use_icons: bool) -> str:
+    if not use_icons:
+        return ""
+    icons = {"success": ICON_SUCCESS, "warning": ICON_WARNING, "error": ICON_ERROR, "info": ICON_INFO}
+    return f"{icons.get(kind, ICON_INFO)} "
+
+
+def styled_line(text: str, kind: str = "info", colour_enabled: bool = False, use_icons: bool = True) -> str:
+    colour_map = {
+        "success": ANSI_GREEN,
+        "warning": ANSI_YELLOW,
+        "error": ANSI_RED,
+        "info": ANSI_CYAN,
+    }
+    return f"{colourize(icon_prefix(kind, use_icons) + text, colour_map.get(kind, ANSI_CYAN), colour_enabled)}"
+
+
+def log_line(text: str, kind: str = "info", quiet: bool = False, colour_enabled: bool = False, use_icons: bool = True):
+    if not quiet:
+        print(styled_line(text, kind=kind, colour_enabled=colour_enabled, use_icons=use_icons))
 
 
 def load_module(name: str):
@@ -148,7 +188,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
     return {"findings": scored, "correlations": score_module.correlate(scored)}
 
 
-def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool = False, include_tests: bool = False, include_env_files: bool = False):
+def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool = False, include_tests: bool = False, include_env_files: bool = False, colour_enabled: bool = False, use_icons: bool = True):
     all_findings = []
     audit_warnings = []
     total = len(SCANNER_MODULES)
@@ -165,7 +205,7 @@ def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool
         nonlocal files_checked
         files_checked = max(files_checked, count)
         if count and count % 250 == 0:
-            emit(f"Scanning... {count} files checked", quiet)
+            log_line(f"Scanning... {count} files checked", kind="info", quiet=quiet, colour_enabled=colour_enabled, use_icons=use_icons)
     for index, module_name in enumerate(SCANNER_MODULES, start=1):
         scanner = load_module(module_name)
         emit(f"[{index}/{total}] {labels.get(module_name, f'Scanning {module_name}') }...", quiet)
@@ -189,7 +229,7 @@ def scan_repo(target_repo: Path, quiet: bool = False, include_dependencies: bool
                 "message": str(exc),
             })
         elapsed = time.perf_counter() - started
-        emit(f"[{index}/{total}] Done {labels.get(module_name, module_name)}. {elapsed:.1f}s", quiet)
+        log_line(f"{labels.get(module_name, module_name)} completed in {elapsed:.1f}s", kind="success", quiet=quiet, colour_enabled=colour_enabled, use_icons=use_icons)
     return all_findings, audit_warnings, files_checked
 
 
@@ -516,6 +556,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", nargs="?", default=".")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--no-colour", action="store_true")
+    parser.add_argument("--no-icons", action="store_true")
     parser.add_argument("--include-dependencies", action="store_true")
     parser.add_argument("--include-tests", action="store_true")
     parser.add_argument("--include-env-files", action="store_true")
@@ -527,14 +569,28 @@ def main(argv=None):
         return 1
 
     try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
         started = time.perf_counter()
+        colour_enabled = supports_color(sys.stdout, args.no_colour)
+        use_icons = not args.no_icons
         emit("Repository Trust Boundary Auditor", args.quiet)
         emit(f"Target: {target_repo}", args.quiet)
         excluded_directories = [".git", "node_modules", "dist", "build", ".venv", "venv", "env", ".tox", ".mypy_cache", ".pytest_cache", "__pycache__", "coverage", ".next", "out", "target", "vendor", "site-packages", ".venv-windows"]
         emit("Mode: application source scan", args.quiet)
-        emit(f"Excluded directories: {len(excluded_directories)}", args.quiet)
-        emit("Scanning source files...", args.quiet)
-        raw_findings, audit_warnings, files_checked = scan_repo(target_repo, args.quiet, args.include_dependencies, args.include_tests, args.include_env_files)
+        log_line(f"Excluded directories: {len(excluded_directories)}", kind="info", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
+        log_line("Scanning source files...", kind="info", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
+        raw_findings, audit_warnings, files_checked = scan_repo(
+            target_repo,
+            args.quiet,
+            args.include_dependencies,
+            args.include_tests,
+            args.include_env_files,
+            colour_enabled=colour_enabled,
+            use_icons=use_icons,
+        )
         emit("Scoring findings...", args.quiet)
         scored = score_findings(raw_findings, args.include_dependencies, args.include_tests)
         scope_summary = {
@@ -557,11 +613,13 @@ def main(argv=None):
             report += "\n" + warnings_block
         report_path.write_text(report, encoding="utf-8")
         emit("")
-        emit("Done.", args.quiet)
+        log_line("Done.", kind="success", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         emit(f"Total elapsed: {time.perf_counter() - started:.1f}s", args.quiet)
         emit(f"Files scanned: {scope_summary['files_scanned']}", args.quiet)
         emit(f"Files skipped: {scope_summary['files_skipped']}", args.quiet)
-        emit(f"Release Decision: {release_decision(scored['findings'])}", args.quiet)
+        decision = release_decision(scored["findings"])
+        decision_kind = "success" if decision == "READY_FOR_PRODUCTION" else "warning" if decision == "REVIEW_REQUIRED" else "error"
+        log_line(f"Release Decision: {decision}", kind=decision_kind, quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)
         emit(f"Findings: {len(scored['findings'])}", args.quiet)
         if audit_warnings:
             emit(f"Audit warnings: {len(audit_warnings)}", args.quiet)

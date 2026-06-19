@@ -1,5 +1,6 @@
 import json
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -22,21 +23,33 @@ def load_script_module(name: str):
 
 
 def run_audit(repo: Path, cwd: Path):
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [sys.executable, str(SCRIPT), str(repo)],
         cwd=cwd,
+        env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
 
 def run_audit_cli(repo: Path, cwd: Path, *extra_args: str):
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [sys.executable, str(SCRIPT), *extra_args, str(repo)],
         cwd=cwd,
+        env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -562,6 +575,59 @@ def test_progress_output_includes_files_scanned_and_skipped(tmp_path):
     assert "Files skipped:" in result.stdout
 
 
+def test_cli_default_output_includes_icons(tmp_path):
+    repo = tmp_path / "icons"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    result = run_audit_cli(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "✓" in result.stdout
+    assert "i Excluded directories:" in result.stdout
+    assert "✓ Done." in result.stdout
+
+
+def test_cli_no_icons_suppresses_icons(tmp_path):
+    repo = tmp_path / "no-icons"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    result = run_audit_cli(repo, tmp_path, "--no-icons")
+
+    assert result.returncode == 0, result.stderr
+    assert "✓" not in result.stdout
+    assert "i Excluded directories:" not in result.stdout
+    assert "Excluded directories:" in result.stdout
+
+
+def test_cli_no_colour_suppresses_ansi_codes(tmp_path, capsys):
+    run_module = load_script_module("run_audit")
+    repo = tmp_path / "colour"
+    repo.mkdir()
+    build_clean_fixture(repo)
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    monkeypatch.setattr(run_module.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.chdir(tmp_path)
+    exit_code = run_module.main(["--no-colour", str(repo)])
+    out = capsys.readouterr().out
+    monkeypatch.undo()
+    assert exit_code == 0
+    assert "\x1b[" not in out
+    assert "✓" in out
+
+
+def test_release_decision_line_uses_expected_status_type(tmp_path):
+    repo = tmp_path / "decision"
+    repo.mkdir()
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit_cli(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "x Release Decision: NOT_READY_FOR_PRODUCTION" in result.stdout
+
+
 def test_markdown_limits_required_fixes_to_top_10(tmp_path):
     repo = tmp_path / "many"
     repo.mkdir()
@@ -623,7 +689,7 @@ def test_cli_shows_progress_by_default(tmp_path):
     assert "Repository Trust Boundary Auditor" in result.stdout
     assert f"Target: {repo.resolve()}" in result.stdout
     assert "[1/6] Scanning secrets..." in result.stdout
-    assert "[6/6] Done Scanning frameworks." in result.stdout
+    assert "✓ Scanning frameworks completed" in result.stdout
     assert "Scoring findings..." in result.stdout
     assert "Generating reports..." in result.stdout
     assert "Done." in result.stdout
