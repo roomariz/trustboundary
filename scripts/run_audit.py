@@ -31,6 +31,7 @@ SCANNER_MODULES = [
     "scan_dependencies",
     "scan_exec_patterns",
     "scan_exfil_patterns",
+    "scan_prompt_injection",
     "scan_skills_and_mcp",
     "scan_frameworks",
 ]
@@ -79,6 +80,11 @@ CATEGORY_METADATA = {
     "prompt_injection": {
         "impact": "Repository content may influence an agent as instructions instead of data.",
         "recommendation": "Untrusted instructions can alter model behavior. Separate content from prompts and sanitize injected text. Prefer structured templates and quoted user content.",
+        "trust_boundary": ["agent", "prompt"],
+    },
+    "agentic_security": {
+        "impact": "Repository content may instruct an agent to override prompts, abuse tools, or extract hidden context.",
+        "recommendation": "Treat prompt-bearing content as untrusted data, quote it explicitly, and separate instructions from inputs.",
         "trust_boundary": ["agent", "prompt"],
     },
     "framework_security": {
@@ -224,7 +230,7 @@ def _finding_evidence_summary(finding):
 def _path_classes(finding):
     source_class = None
     sink_class = None
-    if finding["category"] == "prompt_injection" or finding["rule"] in {"raw_prompt_concatenation", "direct_user_input_in_prompt", "missing_instruction_separation", "unsafe_prompt_construction"}:
+    if finding["category"] in {"prompt_injection", "agentic_security"} or finding["rule"] in {"raw_prompt_concatenation", "direct_user_input_in_prompt", "missing_instruction_separation", "unsafe_prompt_construction"}:
         source_class = "prompt"
     elif finding["rule"] in {"environment_variable_access", "credential_env_passthrough"}:
         source_class = "environment"
@@ -253,6 +259,7 @@ def _trust_boundary_label(source_class: str, sink_class: str) -> str:
         ("prompt", "execution"): "Prompt -> Tool",
         ("prompt", "filesystem"): "Prompt -> Filesystem",
         ("prompt", "network"): "Prompt -> Network",
+        ("prompt", "tool"): "Prompt -> Privileged Action",
         ("environment", "execution"): "Environment -> Execution",
         ("environment", "network"): "Environment -> Network",
         ("file", "execution"): "File -> Execution",
@@ -492,12 +499,15 @@ def trust_paths(findings):
         "network": "Network Sink",
         "credential": "Credential Sink",
         "tool": "Tool Sink",
+        "privileged_action": "Privileged Action Sink",
     }
     paths = []
     class_pairs = [
         ("prompt", "execution", "High", "Prompt data can reach command execution."),
         ("prompt", "filesystem", "Medium", "Prompt data can reach filesystem mutation."),
         ("prompt", "network", "High", "Prompt data can reach outbound requests."),
+        ("prompt", "tool", "High", "Prompt data can reach privileged tool use."),
+        ("prompt", "privileged_action", "High", "Prompt data can reach privileged action paths."),
         ("environment", "execution", "Medium", "Environment values can influence execution paths."),
         ("environment", "network", "Medium", "Environment values can flow into outbound requests."),
         ("file", "execution", "Medium", "File-controlled data can reach execution sinks."),
@@ -551,6 +561,53 @@ def trust_paths(findings):
             ],
             "data_flow_summary": reason,
         })
+    agentic_sources = [f for f in findings if f.get("category") == "agentic_security"]
+    if agentic_sources:
+        source_item = agentic_sources[0]
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if len({f.get("file") for f in agentic_sources if f.get("file")}) == 1 else "cross_file",
+            "boundary": "Prompt -> Tool",
+            "source": "Prompt Input",
+            "source_class": "prompt",
+            "sink": "Tool Sink",
+            "sink_class": "tool",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in agentic_sources) else "Medium",
+            "confidence_score": 86,
+            "evidence": [source_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                }
+            ],
+            "data_flow_summary": "Prompt-like instructions can steer tool use.",
+        })
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if len({f.get("file") for f in agentic_sources if f.get("file")}) == 1 else "cross_file",
+            "boundary": "Prompt -> Privileged Action",
+            "source": "Prompt Input",
+            "source_class": "prompt",
+            "sink": "Privileged Action Sink",
+            "sink_class": "privileged_action",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in agentic_sources) else "Medium",
+            "confidence_score": 88,
+            "evidence": [source_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                }
+            ],
+            "data_flow_summary": "Prompt-like instructions can be treated as privileged action requests.",
+        })
     if any(f["category"] == "framework_security" for f in findings):
         paths.append({
             "path_type": "source_to_sink",
@@ -602,6 +659,22 @@ def attack_chains(trust_paths_items):
             "reason": "Prompt-controlled input can reach execution sinks.",
             "confidence_score": 80,
             "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Prompt ->")),
+        })
+    if has_source("prompt") and has_sink("tool"):
+        chains.append({
+            "name": "Prompt -> Tool",
+            "risk": "High",
+            "reason": "Prompt-controlled input can influence privileged tool selection or invocation.",
+            "confidence_score": 86,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Prompt ->")),
+        })
+    if has_source("prompt") and has_sink("privileged_action"):
+        chains.append({
+            "name": "Prompt -> Privileged Action",
+            "risk": "High",
+            "reason": "Prompt-controlled input can reach privileged action boundaries.",
+            "confidence_score": 87,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and "Prompt ->" in name),
         })
     if has_source("prompt") and has_sink("credential") or has_source("tool") and has_sink("credential"):
         chains.append({
@@ -719,6 +792,14 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         "",
         "## Top Risks",
     ]
+    agentic_findings = [finding for finding in findings if finding.get("category") == "agentic_security"]
+    lines.extend([
+        "",
+        "## Agentic AI Security",
+        f"- Prompt Injection Findings: {sum(1 for finding in agentic_findings if finding.get('rule') in {'prompt_override', 'role_manipulation', 'hidden_instruction'})}",
+        f"- Tool Abuse Findings: {sum(1 for finding in agentic_findings if finding.get('rule') == 'tool_abuse_instruction')}",
+        f"- Prompt Extraction Findings: {sum(1 for finding in agentic_findings if finding.get('rule') == 'prompt_extraction')}",
+    ])
     if risks:
         for index, finding in enumerate(risks, start=1):
             lines.append(f"{index}. {finding['rule']} ({finding['severity']}, {finding['confidence_level']}) - {finding.get('evidence_snippet')}")

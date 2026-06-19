@@ -63,6 +63,11 @@ SEVERITY_BY_RULE = {
     "missing_tool_validation": "Medium",
     "unsafe_prompt_construction": "Medium",
     "unrestricted_tool_execution": "Medium",
+    "prompt_override": "High",
+    "role_manipulation": "High",
+    "tool_abuse_instruction": "High",
+    "prompt_extraction": "High",
+    "hidden_instruction": "Medium",
 }
 
 LOW_CONTEXT_TAGS = ["test", "fixture", "example", "sample", "mock"]
@@ -132,6 +137,8 @@ def adjust_confidence(finding):
         score = min(score, 45 if finding.get("category") == "leaked_secrets" else 35)
     if finding.get("category") == "prompt_injection":
         score = min(score, 70)
+    if finding.get("category") == "agentic_security":
+        score = min(score, 85)
     return max(0, min(100, score))
 
 
@@ -180,6 +187,11 @@ def severity_for_finding(finding):
             return "High"
         if finding["rule"] in {"exec_call", "os_system", "child_process_exec"}:
             return "Medium"
+
+    if finding["category"] == "agentic_security":
+        if finding["rule"] in {"prompt_override", "role_manipulation", "tool_abuse_instruction", "prompt_extraction"}:
+            return "High"
+        return "Medium"
 
     return severity
 
