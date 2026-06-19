@@ -600,6 +600,88 @@ def calculate_trust_score(findings, trust_paths_items, attack_chains_items, acti
     }
 
 
+def production_readiness(findings, trust_paths_items, attack_chains_items, active_suppressions=None, expired_suppressions=None, audit_warnings=None, trust_score_info=None, unsuppressed_findings=None):
+    active_suppressions = list(active_suppressions or [])
+    expired_suppressions = list(expired_suppressions or [])
+    audit_warnings = list(audit_warnings or [])
+    unsuppressed_findings = list(unsuppressed_findings or findings)
+    trust_score_info = trust_score_info or calculate_trust_score(findings, trust_paths_items, attack_chains_items, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, unsuppressed_findings=unsuppressed_findings)
+
+    def critical_expired_suppressions():
+        critical_rules = {finding.get("rule") for finding in unsuppressed_findings if finding.get("severity") == "Critical"}
+        return [
+            suppression
+            for suppression in expired_suppressions
+            if suppression.get("rule") in critical_rules
+        ]
+
+    production_findings = [finding for finding in findings if not is_documentation_finding(finding) and (finding.get("scope") == "production" or "production" in set(finding.get("scope_tags", [])))]
+    blockers = [finding for finding in production_findings if finding.get("production_blocker") or finding.get("severity") == "Critical"]
+    review_items = [finding for finding in production_findings if finding not in blockers and finding.get("severity") in {"High", "Medium", "Low"}]
+    risky_paths = [path for path in trust_paths_items if path.get("risk") in {"High", "Critical"} and path.get("confidence") in {"High", "Medium"}]
+    high_confidence_chains = [chain for chain in attack_chains_items if chain.get("confidence_score", 0) >= 90]
+    unresolved_agentic_chains = [chain for chain in attack_chains_items if any("Agent" in boundary for boundary in chain.get("supporting_boundaries", [])) or "Agent" in chain.get("name", "")]
+
+    if audit_warnings:
+        status = "NOT_READY_FOR_PRODUCTION"
+        reason = "Scanner failures prevent a complete production assessment."
+    elif blockers or critical_expired_suppressions():
+        status = "NOT_READY_FOR_PRODUCTION"
+        reason = "Critical production risk remains unresolved."
+    elif any(finding.get("severity") == "High" for finding in production_findings) or high_confidence_chains or unresolved_agentic_chains or risky_paths:
+        status = "REVIEW_REQUIRED"
+        reason = "High-confidence production risk paths or chains still need review."
+    elif review_items:
+        status = "READY_WITH_REVIEW"
+        reason = "Only medium or low production review items remain."
+    elif trust_score_info.get("trust_score", 0) >= 90:
+        status = "READY_FOR_PRODUCTION"
+        reason = "No meaningful production findings remain and trust score is high."
+    else:
+        status = "READY_WITH_REVIEW"
+        reason = "Residual production evidence remains, but it is limited to review items."
+
+    next_steps = []
+    if status == "NOT_READY_FOR_PRODUCTION":
+        next_steps = [
+            "Fix all critical production findings.",
+            "Resolve scanner failures before release.",
+            "Re-run the audit after remediation.",
+        ]
+    elif status == "REVIEW_REQUIRED":
+        next_steps = [
+            "Review high-confidence attack chains and risky trust paths.",
+            "Tighten agentic or tool-mediated production flows.",
+            "Re-run the audit after review.",
+        ]
+    elif status == "READY_WITH_REVIEW":
+        next_steps = [
+            "Address the remaining medium and low production items.",
+            "Document any accepted residual risk.",
+            "Re-run the audit before production release.",
+        ]
+    else:
+        next_steps = [
+            "Proceed with production release controls.",
+            "Keep the current audit output as the release evidence.",
+        ]
+
+    blockers_list = [finding["id"] for finding in blockers[:10]]
+    if critical_expired_suppressions():
+        blockers_list.extend([f"suppression:{suppression['rule']}" for suppression in critical_expired_suppressions()])
+    if audit_warnings:
+        blockers_list.extend([f"scanner:{warning.get('scanner', 'unknown')}" for warning in audit_warnings])
+
+    review_item_ids = [finding["id"] for finding in review_items[:10]]
+    return {
+        "status": status,
+        "reason": reason,
+        "blockers": blockers_list,
+        "review_items": review_item_ids,
+        "recommended_next_steps": next_steps,
+    }
+
+
 def top_risks(findings, repo_config=None):
     eligible = [
         finding
@@ -1349,6 +1431,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     framework_items = framework_findings(findings)
     risks = top_risks(findings, repo_config=repo_config)
     trust_score_info = calculate_trust_score(findings, paths, chains, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, unsuppressed_findings=unsuppressed_findings)
+    readiness = production_readiness(findings, paths, chains, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, trust_score_info=trust_score_info, unsuppressed_findings=unsuppressed_findings)
 
     blockers_exist = bool(required)
     blocker_label = "Production Blockers" if decision == "NOT_READY_FOR_PRODUCTION" else "Blocking Review"
@@ -1389,6 +1472,18 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
             lines.append(f"  - {driver['driver']}: -{driver['points']} ({driver['evidence']})")
     else:
         lines.append("  - None")
+
+    lines.extend([
+        "",
+        "## Production Readiness",
+        f"- Status: {readiness['status']}",
+        f"- Reason: {readiness['reason']}",
+        f"- Blockers: {', '.join(readiness['blockers']) if readiness['blockers'] else 'None'}",
+        f"- Review items: {', '.join(readiness['review_items']) if readiness['review_items'] else 'None'}",
+        "- Recommended next steps:",
+    ])
+    for step in readiness["recommended_next_steps"]:
+        lines.append(f"  - {step}")
 
     lines.extend([
         "",
@@ -1605,6 +1700,7 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
     decision = release_decision(findings, audit_warnings=audit_warnings)
     surface = attack_surface_summary(findings)
     trust_score_info = calculate_trust_score(findings, trust_paths(findings), attack_chains(trust_paths(findings)), active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, unsuppressed_findings=unsuppressed_findings)
+    readiness = production_readiness(findings, trust_paths(findings), attack_chains(trust_paths(findings)), active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, trust_score_info=trust_score_info, unsuppressed_findings=unsuppressed_findings)
     scope_counts = {
         scope: sum(1 for finding in findings if scope in set(finding.get("scope_tags", [])))
         for scope in ["production", "test", "dependency", "generated", "documentation"]
@@ -1626,6 +1722,13 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
             "trust_score": trust_score_info["trust_score"],
             "trust_grade": trust_score_info["trust_grade"],
             "trust_score_reasoning": trust_score_info["trust_score_reasoning"],
+            "production_readiness": {
+                "status": readiness["status"],
+                "reason": readiness["reason"],
+                "blockers": readiness["blockers"],
+                "review_items": readiness["review_items"],
+                "recommended_next_steps": readiness["recommended_next_steps"],
+            },
             "scope_counts": scope_counts,
         },
         "suppressions": {

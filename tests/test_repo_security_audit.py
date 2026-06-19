@@ -1976,6 +1976,98 @@ def test_cli_quiet_suppresses_progress_but_writes_outputs(tmp_path):
     assert "Trust Score:" not in result.stdout
 
 
+def test_readiness_state_ready_for_production(tmp_path):
+    repo = tmp_path / "ready"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    readiness = payload["summary"]["production_readiness"]
+    assert readiness["status"] == "READY_FOR_PRODUCTION"
+    assert readiness["reason"]
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "## Production Readiness" in report
+    assert "READY_FOR_PRODUCTION" in report
+
+
+def test_readiness_state_ready_with_review(tmp_path):
+    repo = tmp_path / "ready-review"
+    repo.mkdir()
+    write(repo / "app.py", "open('temp.txt', 'w').write('x')\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    readiness = payload["summary"]["production_readiness"]
+    assert readiness["status"] == "READY_WITH_REVIEW"
+    assert readiness["review_items"]
+
+
+def test_readiness_state_review_required(tmp_path):
+    repo = tmp_path / "review-required"
+    repo.mkdir()
+    build_fastapi_unsafe_fixture(repo)
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    readiness = payload["summary"]["production_readiness"]
+    assert readiness["status"] == "REVIEW_REQUIRED"
+    assert readiness["blockers"] or payload["attack_chains"]
+
+
+def test_readiness_state_not_ready_for_production_from_critical_findings(tmp_path):
+    repo = tmp_path / "not-ready"
+    repo.mkdir()
+    write(repo / "secret.py", 'api_key = "AKIA1234567890ABCDEF"\n')
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    readiness = payload["summary"]["production_readiness"]
+    assert readiness["status"] == "NOT_READY_FOR_PRODUCTION"
+    assert readiness["blockers"]
+
+
+def test_readiness_state_not_ready_for_production_from_scanner_failure(tmp_path, monkeypatch):
+    run_module = load_script_module("run_audit")
+    repo = tmp_path / "scanner-failure"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    class PassingScanner:
+        def walk(self, _repo):
+            return []
+
+    class FailingScanner:
+        def walk(self, _repo):
+            raise RuntimeError("boom")
+
+    def fake_load_module(name):
+        if name == "score":
+            return load_script_module("score")
+        if name == "scan_dependencies":
+            return FailingScanner()
+        return PassingScanner()
+
+    monkeypatch.setattr(run_module, "load_module", fake_load_module)
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = run_module.main([str(repo)])
+
+    assert exit_code == 0
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    readiness = payload["summary"]["production_readiness"]
+    assert readiness["status"] == "NOT_READY_FOR_PRODUCTION"
+    assert any(item.startswith("scanner:") for item in readiness["blockers"])
+
+
 def test_scan_skills_and_mcp_handles_json_list_and_malformed_config(tmp_path):
     scan_module = load_script_module("scan_skills_and_mcp")
     repo = tmp_path / "repo"
