@@ -537,6 +537,42 @@ def test_env_files_are_scanned_for_secrets_only(tmp_path):
     assert "unsafe_prompt_construction" not in rules
 
 
+def test_lockfiles_do_not_trigger_entropy_secret_scanning(tmp_path):
+    repo = tmp_path / "lockfiles"
+    repo.mkdir()
+    write(repo / "package-lock.json", json.dumps({"name": "demo", "lockfileVersion": 3, "packages": {"": {"version": "1.0.0"}}}))
+    write(repo / "pnpm-lock.yaml", "lockfileVersion: 5.4\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert not any(finding["rule"] == "high_entropy_literal" for finding in payload["findings"])
+
+
+def test_markdown_documentation_does_not_create_production_blockers(tmp_path):
+    repo = tmp_path / "docs"
+    repo.mkdir()
+    write(
+        repo / "README.md",
+        """# Docs
+
+This document mentions subprocess.run(shell=True) as a warning only.
+
+```python
+subprocess.run("echo hi", shell=True)
+```
+""",
+    )
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert all(not finding["production_blocker"] for finding in payload["findings"])
+    assert any(finding["file"].endswith("README.md") for finding in payload["findings"])
+
+
 def test_vendor_findings_do_not_create_production_blockers_by_default(tmp_path):
     repo = tmp_path / "vendor"
     repo.mkdir()
@@ -549,6 +585,40 @@ def test_vendor_findings_do_not_create_production_blockers_by_default(tmp_path):
     payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
     assert all("vendor" not in finding["file"] for finding in payload["findings"])
     assert payload["summary"]["production_blockers"] == 0
+
+
+def test_env_access_finding_uses_configuration_advice(tmp_path):
+    repo = tmp_path / "env-advice"
+    repo.mkdir()
+    write(repo / "app.py", "import os\nvalue = os.getenv('API_KEY')\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    env_findings = [finding for finding in payload["findings"] if finding["rule"] == "environment_variable_access"]
+    assert env_findings
+    assert all(finding["recommendation"].startswith("Read configuration from the environment") or "dotenv" in finding["recommendation"].lower() or "configuration" in finding["recommendation"].lower() for finding in env_findings)
+
+
+def test_filesystem_and_execution_rules_use_specific_recommendations(tmp_path):
+    repo = tmp_path / "advice"
+    repo.mkdir()
+    write(repo / "app.py", "import os\nimport subprocess\nopen('x', 'w')\nos.system('ls')\nsubprocess.run('ls', shell=True)\neval(user_input)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    by_rule = {finding["rule"]: finding["recommendation"] for finding in payload["findings"]}
+    assert "filesystem_read_access" in by_rule
+    assert "filesystem_write_access" in by_rule
+    assert "filesystem_delete_access" not in by_rule or "filesystem" in by_rule.get("filesystem_delete_access", "").lower()
+    assert "shell_true" in by_rule
+    assert "eval_on_dynamic_input" in by_rule
+    assert "filesystem" in by_rule["filesystem_write_access"].lower()
+    assert "execution" in by_rule["shell_true"].lower()
+    assert "execution" in by_rule["eval_on_dynamic_input"].lower()
 
 
 def test_include_dependencies_includes_dependency_paths(tmp_path):

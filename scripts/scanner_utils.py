@@ -29,6 +29,17 @@ SKIP_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".woff", ".wof
 MAX_FILE_SIZE = 1024 * 1024
 TEXT_SUFFIXES = {".py", ".js", ".ts", ".sh", ".yml", ".yaml", ".json", ".toml", ".md", ".txt", ".ini", ".cfg", ".conf"}
 ENV_FILE_NAMES = {".env", ".env.local", ".env.development", ".env.production", ".env.test", ".env.sample", ".env.example"}
+LOCKFILE_NAMES = {
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "Gemfile.lock",
+    "composer.lock",
+    "Cargo.lock",
+    "Pipfile.lock",
+    "poetry.lock",
+    "go.sum",
+}
 
 
 def is_env_file(path: Path) -> bool:
@@ -43,6 +54,10 @@ def is_test_path(path: Path) -> bool:
 def is_dependency_path(path: Path) -> bool:
     parts = {part.lower() for part in path.parts}
     return any(part in {"node_modules", "site-packages", "vendor"} for part in parts)
+
+
+def is_lockfile(path: Path) -> bool:
+    return path.name in LOCKFILE_NAMES
 
 
 def iter_repo_files(repo_path, include_tests: bool = False, include_dependencies: bool = False, progress_callback=None):

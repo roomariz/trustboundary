@@ -6,7 +6,7 @@ generic string literals. Prints JSON findings to stdout. No network access.
 """
 import sys, os, re, json, math, fnmatch
 from pathlib import Path
-from scanner_utils import iter_repo_files, relativise
+from scanner_utils import iter_repo_files, relativise, is_lockfile
 LOW_CONTEXT_PATTERNS = ["test", "fixture", "example", "sample", "mock", "placeholder"]
 
 SIGNATURES = [
@@ -48,10 +48,11 @@ def scan_file(path: str, findings: list):
                     "base_confidence": conf,
                 })
         # generic high-entropy literal check (cheap heuristic, low base confidence)
+        allow_entropy = not is_lockfile(Path(path))
         for m in re.finditer(r"""['"]([A-Za-z0-9+/_\-]{24,})['"]""", line):
             token = m.group(1)
             ent = shannon_entropy(token)
-            if ent > 4.0:
+            if allow_entropy and ent > 4.0:
                 findings.append({
                     "category": "leaked_secrets",
                     "rule": "high_entropy_literal",
@@ -60,6 +61,8 @@ def scan_file(path: str, findings: list):
                     "evidence_redacted": redact(token),
                     "base_confidence": max(0, min(100, 40 + context_discount(path))),
                 })
+            elif not allow_entropy:
+                continue
 
 def redact(s: str) -> str:
     if len(s) <= 8:

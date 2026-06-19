@@ -58,7 +58,7 @@ CATEGORY_METADATA = {
     },
     "unsafe_execution": {
         "impact": "Repository code can execute shell commands or dynamic code paths.",
-        "recommendation": "Replace shell and eval usage with explicit APIs and input validation.",
+        "recommendation": "Replace shell and eval usage with explicit execution APIs, argument lists, and input validation.",
         "trust_boundary": ["execution", "filesystem"],
     },
     "insecure_config": {
@@ -86,6 +86,19 @@ CATEGORY_METADATA = {
         "recommendation": "Add the missing dependency, allowlist, or tenant guard before exposing the path to production. Prefer framework-native auth and validation hooks.",
         "trust_boundary": ["framework"],
     },
+}
+
+RULE_RECOMMENDATIONS = {
+    "filesystem_read_access": "Review each read path and restrict filesystem access to allowlisted files and directories.",
+    "filesystem_write_access": "Use filesystem-specific allowlists, write only to expected locations, and validate any user-controlled filenames.",
+    "filesystem_delete_access": "Guard destructive file operations with explicit allowlists and verify targets before deletion.",
+    "recursive_filesystem_operation": "Avoid broad recursive filesystem traversal unless the scope is explicitly bounded.",
+    "eval_on_dynamic_input": "Replace eval with explicit execution-safe parsing or dispatch logic and never evaluate user-controlled text.",
+    "exec_call": "Use structured process execution instead of exec so arguments are not interpreted as code.",
+    "shell_true": "Remove shell=True and pass arguments as a list to a bounded execution API.",
+    "os_system": "Replace os.system with a structured process API and explicit argument handling.",
+    "env_access": "Read configuration from the environment intentionally, validate missing values, and keep secrets out of source files.",
+    "dotenv_usage": "Use dotenv only for local development and avoid treating .env as a production secret source.",
 }
 
 SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
@@ -160,6 +173,8 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
         evidence_count = finding.get("evidence_count") or len([item for item in evidence_locations if item.get("file")])
         path = Path(finding.get("file") or "")
         production_blocker = severity in BLOCKING_SEVERITIES
+        if path.suffix.lower() in {".md", ".txt", ".rst"} and finding["category"] != "leaked_secrets":
+            production_blocker = False
         if is_test_path(path) and not include_tests:
             production_blocker = False
         if is_dependency_path(path) and not include_dependencies:
@@ -178,7 +193,7 @@ def score_findings(raw_findings, include_dependencies: bool = False, include_tes
             "evidence_locations": evidence_locations,
             "confidence_level": score_module.confidence_level(confidence),
             "impact": metadata.get("impact", "Review the finding and validate whether it is a real risk."),
-            "recommendation": metadata.get("recommendation", "Review the flagged code or configuration and reduce the risky pattern."),
+            "recommendation": RULE_RECOMMENDATIONS.get(finding["rule"], metadata.get("recommendation", "Review the flagged code or configuration and reduce the risky pattern.")),
             "remediation_priority": REMEDIATION_PRIORITY.get(severity, "RECOMMENDED"),
             "trust_boundary": metadata.get("trust_boundary", ["unknown"]),
             "production_blocker": production_blocker,
