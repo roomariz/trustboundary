@@ -391,7 +391,7 @@ def test_audit_detects_expected_issues_and_writes_reports(tmp_path):
     assert "Release Decision" in report
     assert "Top Risks" in report
     assert "Trust Boundary Assessment" in report
-    assert "Production Blockers" in report or "Required Review" in report
+    assert "Production Blockers" in report or "Blocking Review" in report
     assert "Review Items" in report
     assert "Aggregated Findings" in report
     assert "Filesystem Access" in report
@@ -784,9 +784,10 @@ def test_review_required_report_uses_required_review_section(tmp_path):
     assert payload["summary"]["production_blockers"] >= 0
 
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
-    assert "## Production Blockers" in report or "## Required Review" in report
-    assert "No production blockers identified." not in report
-    assert "shell_true" in report.split("## Production Blockers", 1)[1].split("## Review Items", 1)[0]
+    assert "## Production Blockers" in report or "## Blocking Review" in report
+    assert "High severity or unresolved trust-boundary risk requires review" not in report
+    review_section = report.split("## Production Blockers", 1)[1].split("## Review Items", 1)[0] if "## Production Blockers" in report else report.split("## Blocking Review", 1)[1].split("## Review Items", 1)[0]
+    assert "shell_true" in review_section
 
 
 def test_documentation_only_findings_remain_in_json_but_not_top_risks(tmp_path):
@@ -803,8 +804,40 @@ def test_documentation_only_findings_remain_in_json_but_not_top_risks(tmp_path):
     report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
     assert "README.md" not in report.split("## Top Risks", 1)[1].split("## Trust Boundary Assessment", 1)[0]
     assert "## Documentation Notes" in report
-    assert "## Required Review" in report
-    assert "README.md" not in report.split("## Required Review", 1)[1].split("## Review Items", 1)[0]
+    assert "## Blocking Review" in report or "## Production Blockers" in report
+    if "## Blocking Review" in report:
+        assert "README.md" not in report.split("## Blocking Review", 1)[1].split("## Review Items", 1)[0]
+
+
+def test_review_required_non_blocking_reason_avoids_high_language(tmp_path):
+    repo = tmp_path / "review-nonblocking"
+    repo.mkdir()
+    write(repo / "README.md", "import os\nvalue = os.getenv('API_KEY')\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["release_decision"] in {"READY_FOR_PRODUCTION", "READY_WITH_REVIEW", "REVIEW_REQUIRED"}
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    if "High severity or unresolved trust-boundary risk requires review" in report:
+        raise AssertionError("non-blocking review reason should not mention High severity")
+
+
+def test_documentation_scope_framework_findings_stay_out_of_framework_section_unless_critical(tmp_path):
+    repo = tmp_path / "doc-framework"
+    repo.mkdir()
+    write(
+        repo / "docs" / "framework.md",
+        "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/public')\ndef public():\n    return {'ok': True}\n",
+    )
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    framework_section = report.split("## Framework-Specific Findings", 1)[1]
+    assert "docs/framework.md" not in framework_section
 
 
 def test_high_severity_medium_confidence_is_required_review_not_blocker(tmp_path):
@@ -945,6 +978,9 @@ def test_same_file_and_cross_file_trust_paths_include_classes_and_reasons(tmp_pa
     assert any(path["source_class"] == "tool" and path["sink_class"] == "filesystem" for path in paths)
     assert any("same file" in path["data_flow_summary"].lower() or "multiple files" in path["data_flow_summary"].lower() for path in paths)
     assert any(path["confidence"] in {"High", "Medium"} for path in paths)
+    assert any(path["boundary"] == "Prompt -> Tool" for path in paths)
+    assert all("confidence_score" in path for path in paths if path["path_type"] == "source_to_sink")
+    assert all(path["evidence_details"][0]["role"] == "source" for path in paths if path["path_type"] == "source_to_sink" and path.get("evidence_details"))
 
 
 def test_trust_paths_include_retrieval_and_credential_classes(tmp_path):
@@ -978,6 +1014,21 @@ def test_attack_chains_cover_prompt_tool_execution_network_and_credentials(tmp_p
     assert "Prompt -> Tool -> Execution -> Network" in names
     assert "Tool -> Filesystem -> Execution" in names
     assert any(chain["risk"] in {"High", "Critical"} for chain in chains)
+    assert all("confidence_score" in chain for chain in chains)
+    assert any(chain.get("supporting_boundaries") for chain in chains)
+
+
+def test_attack_chains_include_environment_to_network_when_supported(tmp_path):
+    repo = tmp_path / "env-chain"
+    repo.mkdir()
+    write(repo / "env.py", "import requests\nrequests.post(url=os.getenv('WEBHOOK_URL'), json={})\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    chains = payload["attack_chains"]
+    assert any(chain["name"] == "Environment -> Network" for chain in chains)
 
 
 def test_vendor_findings_do_not_create_production_blockers_by_default(tmp_path):

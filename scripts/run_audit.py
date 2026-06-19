@@ -248,6 +248,23 @@ def _path_classes(finding):
     return source_class, sink_class
 
 
+def _trust_boundary_label(source_class: str, sink_class: str) -> str:
+    labels = {
+        ("prompt", "execution"): "Prompt -> Tool",
+        ("prompt", "filesystem"): "Prompt -> Filesystem",
+        ("prompt", "network"): "Prompt -> Network",
+        ("environment", "execution"): "Environment -> Execution",
+        ("environment", "network"): "Environment -> Network",
+        ("file", "execution"): "File -> Execution",
+        ("file", "network"): "File -> Network",
+        ("retrieval", "network"): "Retrieval -> Network",
+        ("tool", "execution"): "Tool -> Execution",
+        ("tool", "filesystem"): "Tool -> Filesystem",
+        ("tool", "credential"): "Tool -> Credential",
+    }
+    return labels.get((source_class, sink_class), f"{source_class.title()} -> {sink_class.title()}")
+
+
 def score_findings(raw_findings, include_dependencies: bool = False, include_tests: bool = False, repo_config=None):
     score_module = load_module("score")
     scored = score_module.score_findings(raw_findings, include_dependencies=include_dependencies, include_tests=include_tests)
@@ -497,8 +514,10 @@ def trust_paths(findings):
             continue
         same_file = any(src.get("file") and src.get("file") == sink.get("file") for src in source_items for sink in sink_items)
         cross_file = any((src.get("file") or "") != (sink.get("file") or "") for src in source_items for sink in sink_items)
-        evidence = [source_items[0]["id"], sink_items[0]["id"]]
+        source_item = source_items[0]
+        sink_item = sink_items[0]
         confidence = "High" if same_file else "Medium" if cross_file else "Low"
+        confidence_score = 85 if same_file else 65 if cross_file else 45
         reason = summary
         if same_file:
             reason += " Source and sink findings appear in the same file."
@@ -507,23 +526,50 @@ def trust_paths(findings):
         paths.append({
             "path_type": "source_to_sink",
             "correlation_type": "same_file" if same_file else "cross_file",
+            "boundary": _trust_boundary_label(source_key, sink_key),
             "source": path_source_labels[source_key],
             "source_class": source_key,
             "sink": path_sink_labels[sink_key],
             "sink_class": sink_key,
             "risk": risk,
             "confidence": confidence,
-            "evidence": evidence,
+            "confidence_score": confidence_score,
+            "evidence": [source_item["id"], sink_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                },
+                {
+                    "finding_id": sink_item["id"],
+                    "file": sink_item.get("file"),
+                    "line": sink_item.get("line"),
+                    "role": "sink",
+                },
+            ],
             "data_flow_summary": reason,
         })
     if any(f["category"] == "framework_security" for f in findings):
         paths.append({
             "path_type": "source_to_sink",
+            "boundary": "Framework -> Privileged Tool",
             "source": "Framework Entry Point",
             "sink": "Privileged Tool or Route",
             "risk": "Low",
             "confidence": "Low",
+            "confidence_score": 35,
             "evidence": [f["id"] for f in findings if f["category"] == "framework_security"][:2],
+            "evidence_details": [
+                {
+                    "finding_id": f["id"],
+                    "file": f.get("file"),
+                    "line": f.get("line"),
+                    "role": "framework",
+                }
+                for f in findings if f["category"] == "framework_security"
+            ][:2],
             "data_flow_summary": "Framework-specific entry points may lack authentication, tenant, or tool validation.",
         })
     return paths
@@ -533,6 +579,7 @@ def attack_chains(trust_paths_items):
     chains = []
     source_classes = {path.get("source_class") for path in trust_paths_items if path.get("source_class")}
     sink_classes = {path.get("sink_class") for path in trust_paths_items if path.get("sink_class")}
+    boundary_names = {path.get("boundary") for path in trust_paths_items if path.get("boundary")}
 
     def has_source(source):
         return source in source_classes
@@ -545,30 +592,48 @@ def attack_chains(trust_paths_items):
             "name": "Prompt -> Tool -> Execution -> Network",
             "risk": "Critical",
             "reason": "Prompt-controlled input can reach tool execution and then outbound communication.",
+            "confidence_score": 90,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Prompt ->")),
         })
     if has_source("prompt") and has_sink("execution"):
         chains.append({
             "name": "Prompt -> Execution",
             "risk": "High",
             "reason": "Prompt-controlled input can reach execution sinks.",
+            "confidence_score": 80,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Prompt ->")),
         })
     if has_source("prompt") and has_sink("credential") or has_source("tool") and has_sink("credential"):
         chains.append({
             "name": "Prompt -> Credential",
             "risk": "Critical",
             "reason": "Prompt-controlled input can reach credential exposure.",
+            "confidence_score": 92,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and ("Prompt ->" in name or "Tool ->" in name)),
         })
     if has_source("retrieval") and has_sink("network"):
         chains.append({
             "name": "Retrieval -> Network",
             "risk": "High",
             "reason": "Retrieved content can flow into outbound requests.",
+            "confidence_score": 84,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Retrieval ->")),
         })
     if has_source("tool") and has_sink("filesystem") and has_sink("execution"):
         chains.append({
             "name": "Tool -> Filesystem -> Execution",
             "risk": "High",
             "reason": "Tool-originated input can touch files and later influence execution.",
+            "confidence_score": 83,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Tool ->")),
+        })
+    if has_source("environment") and has_sink("network"):
+        chains.append({
+            "name": "Environment -> Network",
+            "risk": "Medium",
+            "reason": "Environment-sourced values can influence outbound requests.",
+            "confidence_score": 72,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Environment ->")),
         })
     return chains
 
@@ -586,7 +651,16 @@ def recommended_fixes(findings):
 
 
 def framework_findings(findings):
-    return sorted([finding for finding in findings if finding.get("category") == "framework_security"], key=severity_sort_key)
+    return sorted([
+        finding
+        for finding in findings
+        if finding.get("category") == "framework_security"
+        and (
+            "documentation" not in set(finding.get("scope_tags", []))
+            or finding.get("severity") == "Critical"
+            or finding.get("category") == "leaked_secrets"
+        )
+    ], key=severity_sort_key)
 
 
 def severity_sort_key(finding):
@@ -614,13 +688,17 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     framework_items = framework_findings(findings)
     risks = top_risks(findings, repo_config=repo_config)
 
-    blocker_label = "Production Blockers" if decision == "NOT_READY_FOR_PRODUCTION" else "Required Review"
+    blockers_exist = bool(required)
+    blocker_label = "Production Blockers" if decision == "NOT_READY_FOR_PRODUCTION" else "Blocking Review"
     if audit_warnings:
         required_reason = "One or more scanners failed, so the audit is incomplete and requires manual review"
     elif decision == "NOT_READY_FOR_PRODUCTION":
         required_reason = "Critical finding or High finding with high confidence requires production blocking remediation"
     elif decision == "REVIEW_REQUIRED":
-        required_reason = "High severity or unresolved trust-boundary risk requires review"
+        if blockers_exist:
+            required_reason = "Critical finding or High finding with high confidence requires blocking review"
+        else:
+            required_reason = "Findings exist, but none meet the production blocker threshold"
     elif decision == "READY_WITH_REVIEW":
         required_reason = "Findings exist, but none meet the production blocker threshold"
     else:
@@ -654,9 +732,10 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     if paths:
         for path in paths:
             lines.extend([
-                f"- **{path['source']} -> {path['sink']}**",
+                f"- **{path.get('boundary') or (path['source'] + ' -> ' + path['sink'])}**",
                 f"  - Evidence: {', '.join(path['evidence'])}",
                 f"  - Confidence: {path['confidence']}",
+                f"  - Confidence score: {path.get('confidence_score', '-')}",
                 f"  - Data flow: {path['data_flow_summary']}",
             ])
     else:
@@ -668,7 +747,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     ])
     if chains:
         for chain in chains:
-            lines.append(f"- **{chain['name']}** ({chain['risk']}) - {chain['reason']}")
+            lines.append(f"- **{chain['name']}** ({chain['risk']}, confidence {chain.get('confidence_score', '-')}) - {chain['reason']}")
     else:
         lines.append("- No attack chains inferred.")
 
