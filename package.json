@@ -1,7 +1,7 @@
 {
-  "name": "trustboundary",
+  "name": "repo-security-audit",
   "version": "1.0.0",
-  "description": "Trustboundary security scanner skill bundle for Codex.",
+  "description": "Repository security audit skill bundle for Codex.",
   "license": "MIT",
   "keywords": ["pi-package", "skills", "security", "audit"],
   "pi": {

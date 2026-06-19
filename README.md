@@ -1,10 +1,10 @@
 # Trustboundary
 
-This bundle packages the `trustboundary` skill so it can be installed and used in Codex like other skill plugins.
+This bundle packages the `repo-security-audit` skill so it can be installed and used in Codex like other skill plugins.
 
 ## Contents
 
-- `skills/trustboundary/SKILL.md`
+- `skills/repo-security-audit/SKILL.md`
 - `scripts/`
 - `references/`
 - `.codex-plugin/plugin.json`
@@ -18,16 +18,16 @@ Add this repository as a Codex plugin source, then install the plugin from Codex
 
 Invoke the skill by its name:
 
-- `trustboundary`
+- `repo-security-audit`
 
 Or use the slash command form if your Codex setup exposes skill commands that way:
 
-- `/trustboundary`
+- `/repo-security-audit`
 
 Command-style aliases included in this bundle:
 
-- `.codex-plugin/commands/trustboundary.toml`
-- `.opencode/command/trustboundary.md`
+- `.codex-plugin/commands/repo-security-audit.toml`
+- `.opencode/command/repo-security-audit.md`
 
 ## Notes
 

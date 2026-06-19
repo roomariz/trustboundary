@@ -1,5 +1,5 @@
 ---
-name: trustboundary
+name: repo-security-audit
 description: Use when the user asks to audit, scan, or review a repository (or its agent skills / MCP configuration) for security risks — supply-chain, secrets, dependency confusion, malicious packages, unsafe execution, insecure config, data exfiltration, prompt injection, or MCP/tool abuse. Triggers on phrases like "security audit this repo", "scan for leaked secrets", "check for malicious dependencies", "review our skills/MCP config for risk", or "/repo-security-audit".
 allowed-tools: Read, Grep, Glob, Bash(python3 scripts/*.py:*)
 version: 1.0.0
