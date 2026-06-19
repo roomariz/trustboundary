@@ -20,6 +20,10 @@ INJECTION_PHRASES = [
 ]
 
 BROAD_TOOLS = {"Bash", "WebFetch", "Write", "Execute"}
+NETWORK_TOOL_NAMES = {"Fetch", "WebFetch", "Http", "HTTP", "Request", "Webhook", "Websocket", "Socket"}
+FILESYSTEM_TOOL_NAMES = {"Read", "Write", "Edit", "Filesystem", "File", "Open", "Path"}
+EXECUTION_TOOL_NAMES = {"Bash", "Shell", "Execute", "Run", "Command"}
+CREDS_TOOL_NAMES = {"Env", "Secrets", "Credential", "Token", "Key", "Auth"}
 
 
 def warn_parse(path, findings, message, confidence=25):
@@ -60,6 +64,63 @@ def scan_config_value(path, findings, label, value):
             "evidence_redacted": str(label),
             "base_confidence": 55,
         })
+    is_server_node = "." not in label and "[" not in label
+    if isinstance(value, dict):
+        cmd = value.get("command")
+        args = value.get("args")
+        if is_server_node and (cmd or args):
+            findings.append({
+                "category": "mcp_tool_abuse", "rule": "mcp_server_command_execution_surface",
+                "file": path, "line": None,
+                "evidence_redacted": f"{label}: command execution surface",
+                "base_confidence": 70 if cmd else 60,
+            })
+        env = value.get("env")
+        if is_server_node and isinstance(env, dict) and env:
+            findings.append({
+                "category": "mcp_tool_abuse", "rule": "mcp_env_credentials_exposure",
+                "file": path, "line": None,
+                "evidence_redacted": f"{label}: env fields {', '.join(sorted(env.keys()))}",
+                "base_confidence": 85,
+            })
+        tools = value.get("allowed-tools") or value.get("allowed_tools") or value.get("tools") or value.get("permissions")
+        if is_server_node and tools is not None:
+            tool_text = json.dumps(tools) if not isinstance(tools, str) else tools
+            if "*" in tool_text or "wildcard" in tool_text.lower():
+                findings.append({
+                    "category": "mcp_tool_abuse", "rule": "wildcard_allowed_tools",
+                    "file": path, "line": None,
+                    "evidence_redacted": f"{label}: {tool_text}",
+                    "base_confidence": 80,
+                })
+            if not any(name.lower() in tool_text.lower() for name in (*BROAD_TOOLS, *NETWORK_TOOL_NAMES, *FILESYSTEM_TOOL_NAMES, *EXECUTION_TOOL_NAMES, *CREDS_TOOL_NAMES)):
+                findings.append({
+                    "category": "mcp_tool_abuse", "rule": "missing_tool_allowlist",
+                    "file": path, "line": None,
+                    "evidence_redacted": f"{label}: no explicit allowlist detected",
+                    "base_confidence": 65,
+                })
+            if any(name in tool_text for name in BROAD_TOOLS):
+                findings.append({
+                    "category": "mcp_tool_abuse", "rule": "unrestricted_bash_shell_tool",
+                    "file": path, "line": None,
+                    "evidence_redacted": f"{label}: {tool_text}",
+                    "base_confidence": 70,
+                })
+            if any(name in tool_text for name in FILESYSTEM_TOOL_NAMES):
+                findings.append({
+                    "category": "mcp_tool_abuse", "rule": "unrestricted_filesystem_tool",
+                    "file": path, "line": None,
+                    "evidence_redacted": f"{label}: {tool_text}",
+                    "base_confidence": 70,
+                })
+            if any(name in tool_text for name in NETWORK_TOOL_NAMES):
+                findings.append({
+                    "category": "mcp_tool_abuse", "rule": "unrestricted_network_tool",
+                    "file": path, "line": None,
+                    "evidence_redacted": f"{label}: {tool_text}",
+                    "base_confidence": 70,
+                })
     for pat in INJECTION_PHRASES:
         if re.search(pat, text, re.IGNORECASE):
             findings.append({
@@ -176,7 +237,25 @@ def scan_mcp_config(path, findings):
                             "evidence_redacted": f"interface.{field}",
                             "base_confidence": 70,
                         })
-        return
+            return
+    if base == "mcp.json" and isinstance(data, dict) and any(key in data for key in ("env", "command", "args")):
+        findings.append({
+            "category": "mcp_tool_abuse",
+            "rule": "mcp_server_command_execution_surface",
+            "file": path,
+            "line": None,
+            "evidence_redacted": f"{base}: top-level command surface",
+            "base_confidence": 70,
+        })
+    if base in {"mcp.json", "plugin.json"} and isinstance(data, dict) and "env" in data and isinstance(data["env"], dict):
+        findings.append({
+            "category": "mcp_tool_abuse",
+            "rule": "mcp_env_credentials_exposure",
+            "file": path,
+            "line": None,
+            "evidence_redacted": f"{base}: env fields {', '.join(sorted(data['env'].keys()))}",
+            "base_confidence": 85,
+        })
     if isinstance(data, dict):
         servers = data.get("mcpServers", data.get("servers", {}))
     elif isinstance(data, list):
@@ -194,6 +273,24 @@ def scan_mcp_config(path, findings):
         return
 
     for name, cfg in items:
+        if isinstance(cfg, dict):
+            tools = cfg.get("allowed-tools") or cfg.get("allowed_tools") or cfg.get("tools") or cfg.get("permissions")
+            if tools is not None and (tools == "*" or tools == ["*"] or tools == {"*"}):
+                findings.append({
+                    "category": "mcp_tool_abuse", "rule": "wildcard_allowed_tools",
+                    "file": path,
+                    "line": None,
+                    "evidence_redacted": f"{name}: wildcard allowlist",
+                    "base_confidence": 80,
+                })
+            if tools is None:
+                findings.append({
+                    "category": "mcp_tool_abuse", "rule": "missing_tool_allowlist",
+                    "file": path,
+                    "line": None,
+                    "evidence_redacted": f"{name}: missing allowlist",
+                    "base_confidence": 65,
+                })
         scan_config_value(path, findings, str(name), cfg)
 
 def walk(repo_path, include_tests: bool = False, include_dependencies: bool = False, include_env_files: bool = False, progress_callback=None, ignore_patterns=()):

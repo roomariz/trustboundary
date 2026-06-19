@@ -63,6 +63,13 @@ SEVERITY_BY_RULE = {
     "missing_tool_validation": "Medium",
     "unsafe_prompt_construction": "Medium",
     "unrestricted_tool_execution": "Medium",
+    "wildcard_allowed_tools": "High",
+    "missing_tool_allowlist": "Medium",
+    "unrestricted_bash_shell_tool": "High",
+    "unrestricted_filesystem_tool": "High",
+    "unrestricted_network_tool": "High",
+    "mcp_server_command_execution_surface": "High",
+    "mcp_env_credentials_exposure": "Critical",
     "prompt_override": "High",
     "role_manipulation": "High",
     "tool_abuse_instruction": "High",
@@ -131,6 +138,8 @@ def adjust_confidence(finding):
     if finding.get("category") == "mcp_tool_abuse":
         if any(marker in path or marker in evidence for marker in MCP_RISK_MARKERS):
             score += 10
+        if finding.get("rule") == "mcp_env_credentials_exposure":
+            score = min(100, score + 15)
     if "documentation" in scope_tags:
         score = min(score, 55 if finding.get("category") == "leaked_secrets" else 40)
     if "generated" in scope_tags:
@@ -178,8 +187,10 @@ def severity_for_finding(finding):
         return "Medium"
 
     if finding["category"] == "mcp_tool_abuse":
-        if finding["rule"] in {"suspicious_mcp_tool_description", "dynamic_context_pre_review_exec"}:
-            return "Critical" if finding["rule"] == "suspicious_mcp_tool_description" else "High"
+        if finding["rule"] in {"suspicious_mcp_tool_description", "mcp_env_credentials_exposure"}:
+            return "Critical"
+        if finding["rule"] in {"dynamic_context_pre_review_exec", "wildcard_allowed_tools", "unrestricted_bash_shell_tool", "unrestricted_filesystem_tool", "unrestricted_network_tool", "mcp_server_command_execution_surface"}:
+            return "High"
         return "High" if any(tag in scope_tags for tag in {"agent", "mcp"}) else severity
 
     if finding["category"] == "unsafe_execution":

@@ -245,9 +245,9 @@ def _path_classes(finding):
         sink_class = "execution"
     elif finding["rule"] in {"filesystem_write_access", "filesystem_delete_access"} or finding["category"] == "framework_security" and finding["rule"] in {"missing_tenant_filters", "unsafe_state_mutation"}:
         sink_class = "filesystem"
-    elif finding["category"] == "data_exfiltration":
+    elif finding["category"] == "data_exfiltration" or finding["rule"] == "unrestricted_network_tool":
         sink_class = "network"
-    elif finding["category"] == "leaked_secrets" or finding["rule"] == "high_entropy_literal":
+    elif finding["category"] == "leaked_secrets" or finding["rule"] in {"high_entropy_literal", "mcp_env_credentials_exposure"}:
         sink_class = "credential"
     elif finding["category"] == "mcp_tool_abuse":
         sink_class = "tool"
@@ -499,6 +499,7 @@ def trust_paths(findings):
         "network": "Network Sink",
         "credential": "Credential Sink",
         "tool": "Tool Sink",
+        "network": "Network Sink",
         "privileged_action": "Privileged Action Sink",
     }
     paths = []
@@ -516,6 +517,7 @@ def trust_paths(findings):
         ("tool", "execution", "High", "Tool-originated input can reach execution sinks."),
         ("tool", "filesystem", "Medium", "Tool-originated input can reach filesystem mutation."),
         ("tool", "credential", "High", "Tool-originated input can reach credential exposure."),
+        ("tool", "network", "High", "Tool-originated input can reach outbound requests."),
     ]
     for source_key, sink_key, risk, summary in class_pairs:
         source_items = sources.get(source_key) or []
@@ -608,6 +610,102 @@ def trust_paths(findings):
             ],
             "data_flow_summary": "Prompt-like instructions can be treated as privileged action requests.",
         })
+    mcp_tool_findings = [f for f in findings if f.get("category") == "mcp_tool_abuse"]
+    mcp_credential_findings = [f for f in mcp_tool_findings if f.get("rule") == "mcp_env_credentials_exposure"]
+    if mcp_tool_findings:
+        source_item = mcp_tool_findings[0]
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if len({f.get("file") for f in mcp_tool_findings if f.get("file")}) == 1 else "cross_file",
+            "boundary": "Tool -> Execution",
+            "source": "MCP Tool Configuration",
+            "source_class": "tool",
+            "sink": "Execution Sink",
+            "sink_class": "execution",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in mcp_tool_findings) else "Medium",
+            "confidence_score": 84,
+            "evidence": [source_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                }
+            ],
+            "data_flow_summary": "MCP tool configuration can expose direct execution surface.",
+        })
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if len({f.get("file") for f in mcp_tool_findings if f.get("file")}) == 1 else "cross_file",
+            "boundary": "Tool -> Filesystem",
+            "source": "MCP Tool Configuration",
+            "source_class": "tool",
+            "sink": "Filesystem Sink",
+            "sink_class": "filesystem",
+            "risk": "High",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in mcp_tool_findings) else "Medium",
+            "confidence_score": 82,
+            "evidence": [source_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                }
+            ],
+            "data_flow_summary": "MCP tool configuration can expose filesystem access surface.",
+        })
+    if mcp_tool_findings and any(f.get("rule") == "unrestricted_network_tool" for f in mcp_tool_findings):
+        source_item = next(f for f in mcp_tool_findings if f.get("rule") == "unrestricted_network_tool")
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if len({f.get("file") for f in mcp_tool_findings if f.get("file")}) == 1 else "cross_file",
+            "boundary": "Tool -> Network",
+            "source": "MCP Tool Configuration",
+            "source_class": "tool",
+            "sink": "Network Sink",
+            "sink_class": "network",
+            "risk": "High",
+            "confidence": "High" if source_item.get("confidence_level") == "HIGH" else "Medium",
+            "confidence_score": 83,
+            "evidence": [source_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                }
+            ],
+            "data_flow_summary": "MCP tool configuration can expose outbound network access surface.",
+        })
+    if mcp_credential_findings:
+        source_item = mcp_credential_findings[0]
+        paths.append({
+            "path_type": "source_to_sink",
+            "correlation_type": "same_file" if len({f.get("file") for f in mcp_credential_findings if f.get("file")}) == 1 else "cross_file",
+            "boundary": "Tool -> Credential",
+            "source": "MCP Credential Fields",
+            "source_class": "tool",
+            "sink": "Credential Sink",
+            "sink_class": "credential",
+            "risk": "Critical",
+            "confidence": "High" if any(f.get("confidence_level") == "HIGH" for f in mcp_credential_findings) else "Medium",
+            "confidence_score": 92,
+            "evidence": [source_item["id"]],
+            "evidence_details": [
+                {
+                    "finding_id": source_item["id"],
+                    "file": source_item.get("file"),
+                    "line": source_item.get("line"),
+                    "role": "source",
+                }
+            ],
+            "data_flow_summary": "MCP environment fields can expose credential material.",
+        })
     if any(f["category"] == "framework_security" for f in findings):
         paths.append({
             "path_type": "source_to_sink",
@@ -652,6 +750,22 @@ def attack_chains(trust_paths_items):
             "confidence_score": 90,
             "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Prompt ->")),
         })
+    if has_source("prompt") and has_sink("tool") and has_sink("execution"):
+        chains.append({
+            "name": "Prompt -> Tool -> Execution",
+            "risk": "Critical",
+            "reason": "Prompt-controlled input can influence tool use and reach execution sinks.",
+            "confidence_score": 91,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Prompt ->")),
+        })
+    if has_source("prompt") and has_sink("tool") and has_sink("filesystem"):
+        chains.append({
+            "name": "Prompt -> Tool -> Filesystem",
+            "risk": "High",
+            "reason": "Prompt-controlled input can influence tool use and reach filesystem mutation.",
+            "confidence_score": 88,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Prompt ->")),
+        })
     if has_source("prompt") and has_sink("execution"):
         chains.append({
             "name": "Prompt -> Execution",
@@ -683,6 +797,14 @@ def attack_chains(trust_paths_items):
             "reason": "Prompt-controlled input can reach credential exposure.",
             "confidence_score": 92,
             "supporting_boundaries": sorted(name for name in boundary_names if name and ("Prompt ->" in name or "Tool ->" in name)),
+        })
+    if has_source("tool") and has_sink("credential") and has_sink("network"):
+        chains.append({
+            "name": "Tool -> Credential -> Network",
+            "risk": "Critical",
+            "reason": "Tool-originated input can expose credentials and then reach outbound requests.",
+            "confidence_score": 91,
+            "supporting_boundaries": sorted(name for name in boundary_names if name and name.startswith("Tool ->")),
         })
     if has_source("retrieval") and has_sink("network"):
         chains.append({
