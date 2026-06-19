@@ -1505,6 +1505,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     risks = top_risks(findings, repo_config=repo_config)
     trust_score_info = calculate_trust_score(findings, paths, chains, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, unsuppressed_findings=unsuppressed_findings)
     readiness = production_readiness(findings, paths, chains, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, trust_score_info=trust_score_info, unsuppressed_findings=unsuppressed_findings)
+    audit_trail = build_audit_trail(repo_path, findings, audit_warnings, active_suppressions, risk_state, trust_score_info, readiness, decision, repo_config=repo_config)
 
     blockers_exist = bool(required)
     blocker_label = "Production Blockers" if decision == "NOT_READY_FOR_PRODUCTION" else "Blocking Review"
@@ -1559,6 +1560,8 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         lines.append(f"  - {step}")
 
     lines.extend([
+        "",
+        render_audit_trail(audit_trail),
         "",
         "## Top Risks",
     ])
@@ -1780,6 +1783,64 @@ def render_audit_warnings(warnings):
     return "\n".join(lines) + "\n"
 
 
+def build_audit_trail(repo_path: Path, findings, audit_warnings, active_suppressions, risk_state, trust_score_info, readiness, decision, repo_config=None):
+    scanners = [name for name in SCANNER_MODULES if not repo_config or not repo_config.enabled_scanners or name in repo_config.enabled_scanners]
+    scanner_failures = sorted(
+        (
+            {
+                "scanner": warning.get("scanner", "unknown"),
+                "message": warning.get("message", "-"),
+                "rule": warning.get("rule", "scanner_failed"),
+            }
+            for warning in (audit_warnings or [])
+        ),
+        key=lambda item: (item["scanner"], item["rule"], item["message"]),
+    )
+    trail = {
+        "scan_timestamp": datetime.now().isoformat(timespec="seconds"),
+        "repository_name": repo_path.name or str(repo_path),
+        "scanners": scanners,
+        "scanner_failures": scanner_failures,
+        "findings_count": len(findings),
+        "suppression_count": len(active_suppressions),
+        "risk_acceptance_count": len(risk_state.get("active", [])),
+        "trust_score": trust_score_info["trust_score"],
+        "trust_grade": trust_score_info["trust_grade"],
+        "production_readiness_status": readiness.get("status"),
+        "release_decision": decision,
+        "decision_reasons": [
+            trust_score_info["trust_score_reasoning"][0] if trust_score_info.get("trust_score_reasoning") else "",
+            readiness.get("reason", ""),
+        ],
+        "top_drivers": [
+            {
+                "driver": driver["driver"],
+                "points": driver["points"],
+                "evidence": driver["evidence"],
+            }
+            for driver in trust_score_info.get("top_drivers", [])
+        ],
+        "schema_version": 1,
+    }
+    return trail
+
+
+def render_audit_trail(audit_trail):
+    lines = [
+        "## Audit Trail",
+        f"- Generated at: {audit_trail['scan_timestamp']}",
+        f"- Scanner count: {len(audit_trail['scanners'])}",
+        f"- Findings count: {audit_trail['findings_count']}",
+        f"- Trust Score: {audit_trail['trust_score']}/100 ({audit_trail['trust_grade']})",
+        f"- Production Readiness: {audit_trail['production_readiness_status']}",
+        f"- Release Decision: {audit_trail['release_decision']}",
+        f"- Suppressions: {audit_trail['suppression_count']}",
+        f"- Risk Acceptances: {audit_trail['risk_acceptance_count']}",
+        f"- Scanner Failures: {len(audit_trail['scanner_failures'])}",
+    ]
+    return "\n".join(lines)
+
+
 def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None):
     findings = list(scored["findings"])
     unsuppressed_findings = list(findings)
@@ -1791,6 +1852,7 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
     surface = attack_surface_summary(findings)
     trust_score_info = calculate_trust_score(findings, trust_paths(findings), attack_chains(trust_paths(findings)), active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, unsuppressed_findings=unsuppressed_findings)
     readiness = production_readiness(findings, trust_paths(findings), attack_chains(trust_paths(findings)), active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, trust_score_info=trust_score_info, unsuppressed_findings=unsuppressed_findings)
+    audit_trail = build_audit_trail(repo_path, findings, audit_warnings, active_suppressions, risk_state, trust_score_info, readiness, decision, repo_config=repo_config)
     scope_counts = {
         scope: sum(1 for finding in findings if scope in set(finding.get("scope_tags", [])))
         for scope in ["production", "test", "dependency", "generated", "documentation"]
@@ -1802,6 +1864,7 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
             "path": str(repo_path),
         },
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "audit_trail": audit_trail,
         "summary": {
             "total_findings": len(findings),
             "severity_counts": counts,

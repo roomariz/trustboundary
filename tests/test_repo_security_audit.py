@@ -2224,6 +2224,102 @@ def test_risk_acceptance_markdown_section_renders(tmp_path):
     assert "Accepted findings count" in report
 
 
+def test_audit_trail_json_and_markdown_render(tmp_path):
+    repo = tmp_path / "audit-trail"
+    repo.mkdir()
+    write(repo / "trustboundary.yml", "suppressions:\n  - rule: shell_true\n    path: app.py\n    reason: expected\n    author: Muhammad\n    expires: 2999-12-31\nrisk_acceptance:\n  - rule: shell_true\n    path: app.py\n    reason: expected\n    owner: Muhammad\n    expires: 2999-12-31\n")
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    audit_trail = payload["audit_trail"]
+    assert "scan_timestamp" in audit_trail
+    assert audit_trail["repository_name"] == repo.name
+    assert audit_trail["trust_score"] == payload["summary"]["trust_score"]
+    assert audit_trail["production_readiness_status"] == payload["summary"]["production_readiness"]["status"]
+    assert audit_trail["suppression_count"] == len(payload["suppressions"]["active"])
+    assert audit_trail["risk_acceptance_count"] == len(payload["risk_acceptance"]["active"])
+    assert audit_trail["scanner_failures"] == []
+
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "## Audit Trail" in report
+    assert "Generated at:" in report
+    assert "Scanner Failures:" in report
+
+
+def test_audit_trail_markdown_section_has_stable_lines(tmp_path):
+    repo = tmp_path / "audit-trail-lines"
+    repo.mkdir()
+    write(repo / "app.py", "import subprocess\nsubprocess.run('x', shell=True)\n")
+
+    result = run_audit(repo, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    expected_lines = [
+        "## Audit Trail",
+        "- Trust Score:",
+        "- Production Readiness:",
+        "- Release Decision:",
+        "- Scanner Failures:",
+        "- Suppressions:",
+        "- Risk Acceptances:",
+    ]
+    for line in expected_lines:
+        assert line in report
+
+
+def test_audit_trail_includes_scanner_failures_and_is_deterministic(tmp_path, monkeypatch):
+    run_module = load_script_module("run_audit")
+    repo = tmp_path / "scanner-failure-audit-trail"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    class PassingScanner:
+        def walk(self, _repo):
+            return []
+
+    class FailingScanner:
+        def walk(self, _repo):
+            raise RuntimeError("boom")
+
+    def fake_load_module(name):
+        if name == "score":
+            return load_script_module("score")
+        if name == "scan_dependencies":
+            return FailingScanner()
+        return PassingScanner()
+
+    monkeypatch.setattr(run_module, "load_module", fake_load_module)
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = run_module.main([str(repo)])
+
+    assert exit_code == 0
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    audit_trail = payload["audit_trail"]
+    assert audit_trail["scanner_failures"]
+    assert audit_trail["scanner_failures"][0]["scanner"] == "scan_dependencies"
+    assert list(audit_trail.keys()) == [
+        "scan_timestamp",
+        "repository_name",
+        "scanners",
+        "scanner_failures",
+        "findings_count",
+        "suppression_count",
+        "risk_acceptance_count",
+        "trust_score",
+        "trust_grade",
+        "production_readiness_status",
+        "release_decision",
+        "decision_reasons",
+        "top_drivers",
+        "schema_version",
+    ]
+
+
 def test_scan_skills_and_mcp_handles_json_list_and_malformed_config(tmp_path):
     scan_module = load_script_module("scan_skills_and_mcp")
     repo = tmp_path / "repo"
