@@ -218,6 +218,17 @@ def run_optional_tool(command, cwd: Path):
         return None
 
 
+def external_engine_statuses():
+    return [
+        {"name": "npm audit", "tool": "npm audit"},
+        {"name": "pip-audit", "tool": "pip-audit"},
+        {"name": "semgrep", "tool": "semgrep"},
+        {"name": "gitleaks", "tool": "gitleaks"},
+        {"name": "trivy", "tool": "trivy"},
+        {"name": "codeql", "tool": "codeql"},
+    ]
+
+
 def _external_finding(tool: str, category: str, rule: str, severity: str, confidence: str, file=None, line=None, evidence=None, impact=None, recommendation=None, trust_boundary=None, production_blocker=False, extra=None):
     finding = {
         "tool": tool,
@@ -327,6 +338,7 @@ def parse_codeql(output: str):
 def run_external_engines(target_repo: Path, quiet: bool = False):
     findings = []
     warnings = []
+    statuses = []
     commands = [
         ("npm audit", ["npm", "audit", "--json"], parse_npm_audit),
         ("pip-audit", ["pip-audit", "--format", "json"], parse_pip_audit),
@@ -336,26 +348,41 @@ def run_external_engines(target_repo: Path, quiet: bool = False):
         ("codeql", ["codeql", "database", "analyze", "--format=json"], parse_codeql),
     ]
     for label, command, parser in commands:
+        engine_status = {"name": label, "tool": label, "status": "completed", "finding_count": 0, "message": ""}
         if not tool_available(command[0]):
-            warnings.append({"rule": "scanner_unavailable", "scanner": label, "message": f"{label} is not installed; skipping optional external scan."})
+            engine_status["status"] = "skipped"
+            engine_status["message"] = f"{label} is not installed."
+            warnings.append({"rule": "scanner_unavailable", "scanner": label, "message": f"{label} is not installed."})
             log_line(f"{label} unavailable; skipping.", kind="warning", quiet=quiet)
+            statuses.append(engine_status)
             continue
         result = run_optional_tool(command, target_repo)
         if result is None:
+            engine_status["status"] = "failed"
+            engine_status["message"] = f"{label} could not be started."
             warnings.append({"rule": "scanner_failed", "scanner": label, "message": f"{label} could not be started."})
+            statuses.append(engine_status)
             continue
         if result.returncode not in {0, 1}:
+            engine_status["status"] = "failed"
+            engine_status["message"] = f"{label} exited with code {result.returncode}."
             warnings.append({"rule": "scanner_failed", "scanner": label, "message": f"{label} exited with code {result.returncode}."})
             log_line(f"{label} failed; continuing.", kind="warning", quiet=quiet)
+            statuses.append(engine_status)
             continue
         try:
             parsed = parser(result.stdout or "")
         except Exception as exc:
+            engine_status["status"] = "failed"
+            engine_status["message"] = f"{label} output could not be parsed: {exc}"
             warnings.append({"rule": "scanner_failed", "scanner": label, "message": f"{label} output could not be parsed: {exc}"})
             log_line(f"{label} output parse failed; continuing.", kind="warning", quiet=quiet)
+            statuses.append(engine_status)
             continue
+        engine_status["finding_count"] = len(parsed)
         findings.extend(parsed)
-    return findings, warnings
+        statuses.append(engine_status)
+    return findings, warnings, statuses
 
 
 def emit(message: str, quiet: bool = False):
@@ -971,7 +998,8 @@ def production_readiness(findings, trust_paths_items, attack_chains_items, activ
     high_confidence_chains = [chain for chain in attack_chains_items if chain.get("confidence_score", 0) >= 90]
     unresolved_agentic_chains = [chain for chain in attack_chains_items if any("Agent" in boundary for boundary in chain.get("supporting_boundaries", [])) or "Agent" in chain.get("name", "")]
 
-    if audit_warnings:
+    scanner_issue = any(warning.get("rule") in {"scanner_failed", "scanner_unavailable"} for warning in audit_warnings)
+    if scanner_issue:
         status = "NOT_READY_FOR_PRODUCTION"
         reason = "Scanner failures prevent a complete production assessment."
     elif blockers or critical_expired_suppressions():
@@ -1770,6 +1798,11 @@ def finding_heading(finding):
     return f"[{bucket}] {finding['id']}"
 
 
+def external_assessment_incomplete(external_summary) -> bool:
+    engines = (external_summary or {}).get("engines", [])
+    return any(engine.get("status") in {"skipped", "failed"} for engine in engines)
+
+
 def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, repo_config=None, external_summary=None, explain: bool = False):
     findings = sorted(scored["findings"], key=severity_sort_key)
     unsuppressed_findings = list(findings)
@@ -1789,6 +1822,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     trust_score_info = calculate_trust_score(findings, paths, chains, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, unsuppressed_findings=unsuppressed_findings)
     readiness = production_readiness(findings, paths, chains, active_suppressions=active_suppressions, expired_suppressions=expired_suppressions, audit_warnings=audit_warnings, trust_score_info=trust_score_info, unsuppressed_findings=unsuppressed_findings)
     audit_trail = build_audit_trail(repo_path, findings, audit_warnings, active_suppressions, risk_state, trust_score_info, readiness, decision, repo_config=repo_config)
+    incomplete_external_assessment = external_assessment_incomplete(external_summary)
 
     blockers_exist = bool(required)
     blocker_label = "Production Blockers" if decision == "NOT_READY_FOR_PRODUCTION" else "Blocking Review"
@@ -1809,6 +1843,10 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         f"# Repo Security Audit - {repo_path.name or repo_path} - {datetime.now().date().isoformat()}",
         "",
         "## Executive Summary",
+    ]
+    if incomplete_external_assessment:
+        lines.append("- Full assessment incomplete: one or more optional external cybersecurity engines did not run. This does not mean those areas are clean.")
+    lines.extend([
         f"- Total findings: {len(findings)} (Critical: {counts['Critical']}, High: {counts['High']}, Medium: {counts['Medium']}, Low: {counts['Low']}, Info: {counts['Info']})",
         f"- Overall posture: {posture_label(counts)}",
         f"- Release decision: {decision}",
@@ -1823,7 +1861,7 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         f"- Score: {trust_score_info['trust_score']}/100",
         f"- Grade: {trust_score_info['trust_grade']}",
         "- Top score drivers:",
-    ]
+    ])
     if trust_score_info["top_drivers"]:
         for driver in trust_score_info["top_drivers"]:
             lines.append(f"  - {driver['driver']}: -{driver['points']} ({driver['evidence']})")
@@ -1861,6 +1899,10 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
     lines.extend([
         "",
         "## Production Readiness",
+    ])
+    if incomplete_external_assessment:
+        lines.append("- Full assessment incomplete: one or more optional external cybersecurity engines did not run. This does not mean those areas are clean.")
+    lines.extend([
         f"- Status: {readiness['status']}",
         f"- Reason: {readiness['reason']}",
         f"- Blockers: {', '.join(readiness['blockers']) if readiness['blockers'] else 'None'}",
@@ -2147,13 +2189,6 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         "- No network verification or live registry checking is performed.",
         "- Findings should be treated as leads for human review, not as proof of compromise.",
     ])
-    if audit_warnings:
-        lines.extend([
-            "",
-            "## Audit Warnings",
-        ])
-        for warning in audit_warnings:
-            lines.append(f"- {warning.get('rule', 'scanner_failed')} - {warning.get('scanner', '-')}: {warning.get('message', '-')}")
     lines.extend([
         "",
         "## Framework-Specific Findings",
@@ -2173,9 +2208,14 @@ def render_report(repo_path: Path, scored, scope_summary, audit_warnings=None, r
         "",
         "## External Cybersecurity Engines",
     ])
+    if incomplete_external_assessment:
+        lines.append("- Full assessment incomplete: one or more optional external cybersecurity engines did not run. This does not mean those areas are clean.")
     if external_summary and external_summary.get("engines"):
         for engine in external_summary["engines"]:
-            lines.append(f"- {engine['name']}: {engine['status']} ({engine['finding_count']} finding(s))")
+            if engine["status"] == "completed":
+                lines.append(f"- {engine['name']}: completed ({engine['finding_count']} finding(s))")
+            else:
+                lines.append(f"- {engine['name']}: {engine['status']} - {engine.get('message', '-')}")
         if external_summary.get("warnings"):
             lines.append("- Warnings:")
             for warning in external_summary["warnings"]:
@@ -2196,7 +2236,12 @@ def render_audit_warnings(warnings):
     if not warnings:
         return ""
     lines = ["## Audit Warnings"]
+    seen = set()
     for warning in warnings:
+        key = (warning.get("rule", "scanner_failed"), warning.get("scanner", "-"), warning.get("message", "-"))
+        if key in seen:
+            continue
+        seen.add(key)
         lines.append(f"- {warning.get('rule', 'scanner_failed')} - {warning.get('scanner', '-')}: {warning.get('message', '-')}")
     return "\n".join(lines) + "\n"
 
@@ -2314,7 +2359,7 @@ def build_json_output(repo_path: Path, scored, scope_summary, audit_warnings=Non
             "accepted_findings": risk_state["accepted_findings"],
         },
         "scope": scope_summary,
-        "external_cybersecurity_engines": external_summary or {"engines": [], "warnings": [], "findings": []},
+        "external_cybersecurity_engines": external_summary or {"engines": [], "warnings": [], "findings": [], "assessment_complete": True},
         "trust_boundary": boundary_summary(findings),
         "top_risks": top_risks(findings, repo_config=repo_config),
         "attack_surface": surface,
@@ -2342,7 +2387,7 @@ def _sarif_level(severity: str) -> str:
     return SARIF_SEVERITY_MAP.get(severity, "warning")
 
 
-def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: bool = False):
+def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: bool = False, external_summary=None):
     def _rule_sort_key(rule):
         return (
             rule.get("fullDescription", {}).get("text", ""),
@@ -2430,6 +2475,9 @@ def build_sarif_output(repo_path: Path, findings, repo_config=None, explain: boo
                         "rules": rules,
                     }
                 },
+                "properties": {
+                    "external_cybersecurity_engines": external_summary or {"engines": [], "warnings": [], "findings": [], "assessment_complete": True},
+                },
                 "results": results,
             }
         ],
@@ -2489,19 +2537,13 @@ def main(argv=None):
         external_summary = {"engines": [], "warnings": [], "findings": []}
         if args.full:
             emit("Running external cybersecurity engines...", args.quiet)
-            external_findings, external_warnings = run_external_engines(target_repo, quiet=args.quiet)
+            external_findings, external_warnings, external_statuses = run_external_engines(target_repo, quiet=args.quiet)
             audit_warnings.extend(external_warnings)
             external_summary = {
-                "engines": [
-                    {"name": "npm audit", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "npm audit")},
-                    {"name": "pip-audit", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "pip-audit")},
-                    {"name": "semgrep", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "semgrep")},
-                    {"name": "gitleaks", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "gitleaks")},
-                    {"name": "trivy", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "trivy")},
-                    {"name": "codeql", "status": "completed", "finding_count": sum(1 for finding in external_findings if finding.get("tool") == "codeql")},
-                ],
+                "engines": external_statuses,
                 "warnings": list(external_warnings),
                 "findings": list(external_findings),
+                "assessment_complete": all(engine["status"] == "completed" for engine in external_statuses),
             }
             raw_findings.extend(external_findings)
         audit_warnings = list(audit_warnings or []) + risk_acceptance_warnings(getattr(repo_config, "risk_acceptance", ()))
@@ -2525,7 +2567,7 @@ def main(argv=None):
             report += "\n" + warnings_block
         report_path.write_text(report, encoding="utf-8")
         if args.sarif:
-            sarif_output = build_sarif_output(target_repo, json_output["findings"], repo_config=repo_config, explain=args.explain)
+            sarif_output = build_sarif_output(target_repo, json_output["findings"], repo_config=repo_config, explain=args.explain, external_summary=external_summary)
             sarif_path.write_text(json.dumps(sarif_output, indent=2), encoding="utf-8")
         emit("")
         log_line("Done.", kind="success", quiet=args.quiet, colour_enabled=colour_enabled, use_icons=use_icons)

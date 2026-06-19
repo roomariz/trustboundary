@@ -2750,6 +2750,142 @@ def test_missing_external_tool_adds_warning_without_failing_scan(tmp_path, monke
     assert any(warning["rule"] == "scanner_unavailable" for warning in payload["audit_warnings"])
 
 
+def test_external_engine_missing_renders_skipped_not_completed(tmp_path, monkeypatch):
+    run_module = load_script_module("run_audit")
+    repo = tmp_path / "missing-engine"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    monkeypatch.setattr(
+        run_module,
+        "run_external_engines",
+        lambda target_repo, quiet=False: (
+            [],
+            [{"rule": "scanner_unavailable", "scanner": "pip-audit", "message": "pip-audit is not installed."}],
+            [
+                {"name": "npm audit", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "pip-audit", "status": "skipped", "finding_count": 0, "message": "pip-audit is not installed."},
+                {"name": "semgrep", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "gitleaks", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "trivy", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "codeql", "status": "completed", "finding_count": 0, "message": ""},
+            ],
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = run_module.main([str(repo), "--full"])
+
+    assert exit_code == 0
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    engines = {engine["name"]: engine for engine in payload["external_cybersecurity_engines"]["engines"]}
+    assert engines["pip-audit"]["status"] == "skipped"
+    assert engines["npm audit"]["status"] == "completed"
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert report.count("Full assessment incomplete: one or more optional external cybersecurity engines did not run. This does not mean those areas are clean.") == 3
+    assert "- pip-audit: skipped - pip-audit is not installed." in report
+    assert "- npm audit: completed (0 finding(s))" in report
+
+
+def test_external_engine_failure_renders_failed_not_completed(tmp_path, monkeypatch):
+    run_module = load_script_module("run_audit")
+    repo = tmp_path / "failed-engine"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    monkeypatch.setattr(
+        run_module,
+        "run_external_engines",
+        lambda target_repo, quiet=False: (
+            [],
+            [{"rule": "scanner_failed", "scanner": "pip-audit", "message": "pip-audit exited with code 2."}],
+            [
+                {"name": "npm audit", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "pip-audit", "status": "failed", "finding_count": 0, "message": "pip-audit exited with code 2."},
+                {"name": "semgrep", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "gitleaks", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "trivy", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "codeql", "status": "completed", "finding_count": 0, "message": ""},
+            ],
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = run_module.main([str(repo), "--full"])
+
+    assert exit_code == 0
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    engines = {engine["name"]: engine for engine in payload["external_cybersecurity_engines"]["engines"]}
+    assert engines["pip-audit"]["status"] == "failed"
+    assert payload["summary"]["production_readiness"]["status"] == "NOT_READY_FOR_PRODUCTION"
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert report.count("Full assessment incomplete: one or more optional external cybersecurity engines did not run. This does not mean those areas are clean.") == 3
+    assert "- pip-audit: failed - pip-audit exited with code 2." in report
+
+
+def test_external_engine_completed_renders_completed(tmp_path, monkeypatch):
+    run_module = load_script_module("run_audit")
+    repo = tmp_path / "completed-engine"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    monkeypatch.setattr(
+        run_module,
+        "run_external_engines",
+        lambda target_repo, quiet=False: (
+            [],
+            [],
+            [
+                {"name": "npm audit", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "pip-audit", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "semgrep", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "gitleaks", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "trivy", "status": "completed", "finding_count": 0, "message": ""},
+                {"name": "codeql", "status": "completed", "finding_count": 0, "message": ""},
+            ],
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = run_module.main([str(repo), "--full", "--sarif"])
+
+    assert exit_code == 0
+    payload = json.loads((tmp_path / "security-audit-findings.json").read_text(encoding="utf-8"))
+    for engine in payload["external_cybersecurity_engines"]["engines"]:
+        assert engine["status"] == "completed"
+    sarif = json.loads((tmp_path / "security-audit-findings.sarif").read_text(encoding="utf-8"))
+    assert sarif["runs"][0]["properties"]["external_cybersecurity_engines"]["engines"]
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert "Full assessment incomplete: one or more optional external cybersecurity engines did not run. This does not mean those areas are clean." not in report
+
+
+def test_audit_warnings_render_once(tmp_path):
+    run_module = load_script_module("run_audit")
+    report = run_module.render_audit_warnings([
+        {"rule": "scanner_failed", "scanner": "semgrep", "message": "semgrep exited with code 2."},
+        {"rule": "scanner_failed", "scanner": "semgrep", "message": "semgrep exited with code 2."},
+    ])
+
+    assert report.count("scanner_failed") == 1
+
+
+def test_audit_warnings_section_appears_once(tmp_path, monkeypatch):
+    run_module = load_script_module("run_audit")
+    repo = tmp_path / "warnings-once"
+    repo.mkdir()
+    build_clean_fixture(repo)
+
+    monkeypatch.setattr(run_module, "tool_available", lambda command: False)
+    monkeypatch.setattr(run_module, "run_optional_tool", lambda command, cwd: None)
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = run_module.main([str(repo), "--full"])
+
+    assert exit_code == 0
+    report = (tmp_path / "SECURITY_AUDIT_REPORT.md").read_text(encoding="utf-8")
+    assert report.count("## Audit Warnings") == 1
+
+
 def test_release_decision_escalates_on_confirmed_external_blockers(tmp_path):
     run_module = load_script_module("run_audit")
     findings = [
