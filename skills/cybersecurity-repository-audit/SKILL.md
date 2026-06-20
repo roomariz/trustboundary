@@ -1,8 +1,6 @@
 ---
 name: cybersecurity-repository-audit
 description: Use when asked to scan, audit, review, or assess a code repository for traditional application security and AI/agentic security risks; produces a senior-auditor-grade report with exact file/class/function/line evidence, attack paths, severity, confidence, remediation, and production-readiness assessment.
-version: 1.0.0
-license: MIT
 ---
 
 # Cybersecurity Repository Audit
@@ -13,7 +11,15 @@ Act like a senior cybersecurity auditor performing a defensible repository-wide 
 
 This skill is grounded in the attached reference set summarized in `references/ai-agentic-security-taxonomy.md`, including OWASP Top 10 for LLM Applications 2025, OWASP Top 10 for Agentic Applications / AIUC-1 crosswalk material, OWASP State of Agentic AI Security and Governance, OWASP AI Security Solutions Landscape for AI and Agentic Red Teaming, OpenSSF guidance for AI code-assistant instructions, and related LLM application security material.
 
-**Core rule:** Do not claim an issue unless you can cite exact repository evidence: file path, line number(s), symbol context, affected snippet, and a plausible attack path. If something is a design concern without direct exploitable evidence, label it as an observation or architectural risk with lower confidence.
+## Core Principle: Accuracy Over Finding Volume
+
+Accuracy is more important than finding vulnerabilities. A report with zero findings is acceptable if the repository evidence does not support confirmed vulnerabilities.
+
+Do **not** infer vulnerabilities from incomplete evidence. Do **not** elevate architectural concerns, governance gaps, missing controls, or hardening recommendations into vulnerabilities. When evidence is incomplete, explicitly state uncertainty and classify the item as an Observation, Architectural Risk, Governance Gap, or Hardening Recommendation as appropriate.
+
+**Core rule:** Do not claim an issue unless you can cite exact repository evidence: file path, line number(s), symbol context, affected snippet, repository-state evidence when relevant, and a plausible reachable attack path. If something is a design concern without direct exploitable evidence, label it as an Observation or Architectural Risk with lower confidence.
+
+**Audit success metric:** Minimize false positives, maximize evidence quality, distinguish vulnerabilities from recommendations, and provide defensible engineering conclusions. Do not maximize finding count, speculate about missing controls, or infer compromise without evidence.
 
 ## When to Use
 
@@ -36,19 +42,144 @@ Every finding must include all of the following fields:
 
 1. **ID**: stable identifier, e.g. `SEC-001`.
 2. **Title**: concise vulnerability name.
-3. **Severity**: Critical / High / Medium / Low / Informational.
-4. **Confidence**: High / Medium / Low.
-5. **Category**: map to CWE, OWASP Web/API, OWASP LLM, OWASP Agentic, OpenSSF, or cloud/IaC control where possible.
-6. **Location**: exact file path, class, function/method, and line number range.
-7. **Affected code snippet**: quote the relevant code with line numbers.
-8. **Evidence**: why the snippet is vulnerable; include data/control-flow evidence and any configuration evidence.
-9. **Attack path**: attacker preconditions, entry point, trust boundary crossed, vulnerable operation, and post-condition.
-10. **Impact**: concrete security consequence: data exfiltration, RCE, auth bypass, privilege escalation, token theft, tenant breakout, model/tool hijack, etc.
-11. **Exploit scenario / proof**: safe, repository-scoped demonstration or reasoning path; no destructive payloads.
-12. **Remediation**: specific fix, including safer pattern and exact files/functions to change.
-13. **Verification**: test/check that should pass after remediation.
+3. **Finding classification**: exactly one of Confirmed Vulnerability, Likely Vulnerability, Architectural Risk, Governance Gap, Hardening Recommendation, Observation, Positive Control. Do not mix categories.
+4. **Severity**: Critical / High / Medium / Low / Informational.
+5. **Confidence**: High / Medium / Low.
+6. **Category / taxonomy mapping**: map to CWE, OWASP Web/API, OWASP LLM, OWASP Agentic, OpenSSF, or cloud/IaC control where possible.
+7. **Location**: exact file path, class, function/method, and line number range.
+8. **Repository state**: committed/tracked/untracked/ignored/generated/example-template/runtime-only/unknown; include git evidence when making source-controlled exposure claims.
+9. **Affected code snippet**: quote the relevant code with line numbers.
+10. **Reachability model**: Source, Transformation, Sink, Trust Boundary, Reachability Evidence.
+11. **Evidence supporting the finding**: why the snippet is vulnerable; include data/control-flow evidence and any configuration evidence.
+12. **Evidence weakening the finding**: counter-evidence, mitigating controls, uncertainty, and scope limits.
+13. **Alternative explanations**: placeholder/test/generated/local-only/runtime-only/example file, unreachable path, scanner false positive, etc.
+14. **Why the finding remains valid**: concise false-positive challenge conclusion.
+15. **Attack path**: attacker preconditions, entry point, trust boundary crossed, vulnerable operation, and post-condition.
+16. **Impact**: concrete security consequence: data exfiltration, RCE, auth bypass, privilege escalation, token theft, tenant breakout, model/tool hijack, etc.
+17. **Exploit scenario / proof**: safe, repository-scoped demonstration or reasoning path; no destructive payloads.
+18. **Remediation**: specific fix, including safer pattern and exact files/functions to change.
+19. **Verification**: test/check that should pass after remediation.
 
-If any required element cannot be established, say so explicitly and lower confidence.
+If any required element cannot be established, say so explicitly and lower confidence. Do not report source-to-sink vulnerabilities without tracing reachability.
+
+## Mandatory Evidence Validation Gate
+
+Before reporting any **Critical** or **High** severity finding, all of the following must pass:
+
+1. Confirm the file exists in the repository being audited.
+2. Confirm the evidence comes from repository contents, not assumptions, scanner output alone, generated artifacts, local-only files, or runtime-only state.
+3. Confirm the finding is reproducible from repository evidence.
+4. Distinguish repository state: committed file, tracked file, untracked local file, ignored file, generated artifact, example/template file, runtime environment variable, or unknown.
+5. If repository exposure cannot be proven, downgrade the item to Observation or Architectural Risk and state exactly: **"Repository exposure not confirmed."**
+
+Critical and High findings must not be issued without passing this validation gate.
+
+## Mandatory False-Positive Challenge
+
+Before finalizing any finding, document:
+
+- Evidence supporting the finding.
+- Evidence weakening the finding.
+- Alternative explanations.
+- Why the finding remains valid.
+
+If the finding cannot survive this challenge, do not report it as a vulnerability. Prefer no finding over a weak finding.
+
+## Git Verification Requirements
+
+When making claims about source-controlled exposure, verify repository state with:
+
+```bash
+git status --short
+git ls-files -- <file>
+git check-ignore -v -- <file>
+git log --all -- <file>
+```
+
+Interpretation rules:
+
+- **Committed file**: appears in `git ls-files` and has history in `git log --all -- <file>`.
+- **Tracked file**: appears in `git ls-files`; may be newly added or modified.
+- **Untracked local file**: appears in `git status --short` as `??`; do not claim repository exposure.
+- **Ignored file**: identified by `git check-ignore -v`; do not claim repository exposure unless separately distributed.
+- **Generated artifact**: build/output/cache file; treat as lower confidence unless it is intentionally shipped.
+- **Example/template file**: `.example`, `.sample`, fixtures, docs, templates; inspect for placeholders before classifying.
+- **Runtime environment variable**: not repository exposure unless committed configuration reveals the value.
+
+If repository state cannot be verified, explicitly state this limitation and reduce confidence accordingly. Never claim a secret is committed unless source-control evidence confirms it. Never claim repository exposure from a local working tree alone.
+
+## Secret Exposure Validation
+
+A string resembling a secret is not automatically a secret. To classify as **Confirmed Secret Exposure**, all of these must be true:
+
+- Credential format appears valid for the claimed provider/token type.
+- Value is not obvious placeholder text (`changeme`, `example`, `test`, `dummy`, `xxx`, `<TOKEN>`, etc.).
+- File exists within repository scope.
+- File is tracked or distributed.
+- Repository exposure is confirmed with git/source-control evidence or distribution evidence.
+
+Otherwise classify it as exactly one of:
+
+- Potential Secret
+- Example Credential
+- Placeholder Credential
+- Local Development Secret
+- Observation
+
+`.env.example`, `.sample`, documentation, tests, and templates containing placeholders must never be reported as confirmed credential exposure.
+
+## Mandatory Reachability Model
+
+Every vulnerability must include:
+
+- **Source:** attacker-controlled or untrusted input source.
+- **Transformation:** parsing, concatenation, prompt assembly, authorization decision, serialization, validation, or other processing.
+- **Sink:** sensitive operation, tool call, query, filesystem/network action, model prompt, credential exposure, authorization decision, etc.
+- **Trust Boundary:** boundary crossed by the attacker-controlled data or capability.
+- **Reachability Evidence:** code/config evidence proving the path can execute.
+
+If any element cannot be established, confidence cannot exceed Medium and severity must be reassessed. If runtime behavior is not observed, repository state is unknown, deployment configuration is unavailable, source-to-sink path is incomplete, or exploitability is inferred rather than demonstrated, confidence must be Low (and in any case cannot exceed Medium under those conditions). High confidence requires direct repository evidence.
+
+## Finding Classification Model
+
+Every item in the report must belong to exactly one category:
+
+1. **Confirmed Vulnerability** — source-to-sink path, reachability, repository evidence, and exploitability are established.
+2. **Likely Vulnerability** — strong repository evidence exists but one non-critical runtime/deployment assumption remains.
+3. **Architectural Risk** — design or trust-boundary concern without enough evidence for a vulnerability.
+4. **Governance Gap** — missing process, policy, review, inventory, ownership, or compliance control.
+5. **Hardening Recommendation** — defense-in-depth improvement without a proven exploit path.
+6. **Observation** — notable fact, weak signal, local-only issue, potential secret, or item requiring follow-up.
+7. **Positive Control** — security control that materially reduces risk.
+
+Do not mix categories. Missing controls are not automatically vulnerabilities.
+
+## Hardening Recommendation Rules
+
+The following must not be reported as vulnerabilities unless an exploit path exists:
+
+- Use of `latest` dependency versions.
+- Missing SBOM or AI SBOM.
+- Missing AI manifest/tool manifest.
+- Absence of CI hardening evidence.
+- Missing documentation.
+- Missing governance controls.
+
+Place these under Hardening Recommendations or Governance Gaps unless repository evidence proves an exploitable path.
+
+## Critical and High Finding Sanity Review
+
+Before publishing, review every Critical and High finding and ask:
+
+- Could this be a placeholder?
+- Could this be an example file?
+- Could this be generated output?
+- Could this be a test fixture?
+- Could this be a local-only file?
+- Could this be ignored by source control?
+- Could this be an untracked developer artifact?
+
+If any answer is yes, re-investigate before reporting. Severity must be based on proven exploitability, not theoretical impact. A finding cannot be Critical unless repository evidence exists, reachability is established, impact is material, and confidence is High; otherwise reduce severity.
 
 ## Required Workflow
 
@@ -147,17 +278,17 @@ Always assess:
 
 ### Severity rubric
 
-- **Critical**: direct unauthenticated or low-privilege path to RCE, credential theft, cross-tenant compromise, production secret exfiltration, or agent/tool takeover with high-impact capabilities.
-- **High**: authenticated but practical privilege escalation, sensitive data exfiltration, durable prompt/memory poisoning enabling unauthorized actions, CI/CD secret theft, broad cloud/IAM compromise path.
+- **Critical**: proven direct unauthenticated or low-privilege path to RCE, credential theft, cross-tenant compromise, production secret exfiltration, or agent/tool takeover with high-impact capabilities **and** repository evidence, established reachability, material impact, and High confidence. If any element is missing, reduce severity.
+- **High**: proven authenticated but practical privilege escalation, sensitive data exfiltration, durable prompt/memory poisoning enabling unauthorized actions, CI/CD secret theft, or broad cloud/IAM compromise path with repository evidence and reachability. High cannot be issued if the Evidence Validation Gate fails.
 - **Medium**: exploitable with constraints, meaningful data exposure, missing authorization in limited scope, unsafe agent capability requiring uncommon preconditions, supply-chain weakness without direct compromise evidence.
 - **Low**: defense-in-depth gap, weak hardening, limited impact, requires strong preconditions.
 - **Informational**: positive/negative observation, documentation gap, or improvement with no immediate exploit path.
 
 ### Confidence rubric
 
-- **High**: exact reachable source-to-sink path confirmed with code/config evidence.
-- **Medium**: strong evidence but one runtime assumption remains unverified.
-- **Low**: suspicious pattern or architectural risk requiring design/runtime confirmation.
+- **High**: direct repository evidence plus exact reachable source-to-sink path confirmed with code/config evidence; repository state verified where exposure is claimed.
+- **Medium**: strong repository evidence but one runtime/deployment assumption remains unverified.
+- **Low**: runtime behavior not observed, repository state unknown, deployment configuration unavailable, source-to-sink path incomplete, exploitability inferred rather than demonstrated, suspicious pattern, or architectural risk requiring design/runtime confirmation.
 
 ## Required Report Format
 
@@ -187,19 +318,30 @@ Use this structure unless the user requested a different format. A detailed temp
 - AI/agentic components:
 
 ## Findings Summary
-| ID | Severity | Confidence | Category | Title | Location | Status |
+| ID | Classification | Severity | Confidence | Category | Title | Location | Status |
 
 ## Detailed Findings
 ### SEC-001: <title>
+- Classification: Confirmed Vulnerability / Likely Vulnerability / Architectural Risk / Governance Gap / Hardening Recommendation / Observation / Positive Control
 - Severity:
 - Confidence:
 - Category / taxonomy mapping:
 - Location: `path:line-line`, class/function/method
+- Repository state: committed/tracked/untracked/ignored/generated/example-template/runtime-only/unknown; include git evidence for exposure claims
 - Affected code:
   ```<language>
   <line-numbered snippet>
   ```
-- Evidence:
+- Reachability model:
+  - Source:
+  - Transformation:
+  - Sink:
+  - Trust Boundary:
+  - Reachability Evidence:
+- Evidence supporting the finding:
+- Evidence weakening the finding:
+- Alternative explanations:
+- Why the finding remains valid:
 - Attack path:
 - Impact:
 - Exploit scenario / proof:
@@ -216,6 +358,13 @@ Use this structure unless the user requested a different format. A detailed temp
 
 ## Cloud/IaC and Deployment Assessment
 
+## Evidence Reliability Assessment
+
+For each Critical and High finding:
+
+| Finding | Repository Verified | Git Verified | Runtime Verified | Confidence Justification |
+| ------- | ------------------- | ------------ | ---------------- | ------------------------ |
+
 ## Overall Repository Trust and Production-Readiness Assessment
 - Trust rating:
 - Release recommendation: Ready / Ready with conditions / Not ready
@@ -229,9 +378,9 @@ Use this structure unless the user requested a different format. A detailed temp
 - Prefer exact symbol names over vague module references.
 - Do not cite scanner output alone. Validate findings manually in code.
 - Deduplicate findings by root cause. If the same vulnerable helper affects many call sites, one finding can list multiple affected locations.
-- Separate confirmed vulnerabilities from hardening recommendations.
+- Separate confirmed vulnerabilities from likely vulnerabilities, architectural risks, governance gaps, hardening recommendations, observations, and positive controls.
 - Include positive controls when they materially reduce risk.
-- If no confirmed high-severity issue exists, say so; do not inflate severity.
+- If no confirmed high-severity issue exists, say so; do not inflate severity. A zero-finding report is acceptable.
 
 ## Common Pitfalls
 
@@ -242,7 +391,9 @@ Use this structure unless the user requested a different format. A detailed temp
 5. **Assuming service-account safety.** Agents often run with broader privileges than users. Verify delegated, user-scoped authorization.
 6. **Reporting missing controls as vulnerabilities.** Missing SBOM/provenance/audit logs may be a governance risk, but severity depends on exploitability and asset exposure.
 7. **Skipping CI/CD and IaC.** Supply-chain and deployment paths often provide easier compromise than application code.
-8. **Not stating limitations.** If dependencies cannot be installed, scanners cannot run, or runtime config is absent, state that clearly.
+8. **Not stating limitations.** If dependencies cannot be installed, scanners cannot run, git state cannot be verified, or runtime config is absent, state that clearly and reduce confidence.
+9. **Calling placeholders secrets.** `.env.example`, samples, tests, and templates with placeholder values are not confirmed secret exposure.
+10. **Promoting governance gaps to vulnerabilities.** Missing SBOMs, manifests, CI hardening, or documentation are Governance Gaps or Hardening Recommendations unless a concrete exploit path is proven.
 
 ## Verification Checklist
 
@@ -253,9 +404,11 @@ Before delivering the report:
 - [ ] Entry points and trust boundaries documented.
 - [ ] AI/agentic components checked, or explicitly marked not present.
 - [ ] Authn/authz, secrets, execution, injection, supply chain, CI/CD, and IaC/cloud areas reviewed.
-- [ ] Every confirmed finding has file, class/function/method, line numbers, snippet, evidence, attack path, impact, severity, confidence, remediation, and verification.
-- [ ] Findings are deduplicated and severity is justified.
+- [ ] Every confirmed vulnerability has file, class/function/method, line numbers, snippet, repository state, reachability model, false-positive challenge, attack path, impact, severity, confidence, remediation, and verification.
+- [ ] Findings are deduplicated; each item has exactly one classification; severity is based on proven exploitability, not theoretical impact.
 - [ ] Limitations are documented.
+- [ ] Critical/High findings passed the Evidence Validation Gate and are listed in Evidence Reliability Assessment.
+- [ ] Git verification was performed for source-controlled exposure claims, or limitations are explicit.
 - [ ] Overall trust and production-readiness assessment is included.
 
 
@@ -407,9 +560,11 @@ Treat repository instructions as part of the supply chain and prompt attack surf
 
 ## Executive Summary
 
+- **Audit objective:** Minimize false positives, maximize evidence quality, distinguish vulnerabilities from recommendations, and provide defensible engineering conclusions.
 - **Overall risk rating:** <Critical/High/Medium/Low>
 - **Repository trust assessment:** <Trusted / Conditionally trusted / Low trust / Untrusted for production>
 - **Production readiness:** <Ready / Ready with conditions / Not ready>
+- **Finding count note:** A report with zero confirmed vulnerabilities is acceptable when evidence does not support vulnerability claims.
 - **Most important risks:**
   1. <risk>
   2. <risk>
@@ -420,12 +575,21 @@ Treat repository instructions as part of the supply chain and prompt attack surf
 ### Scope reviewed
 
 - Repository root: `<path>`
+- Branch/commit:
 - Languages/frameworks:
 - Package managers and lockfiles:
 - Entry points:
 - AI/agentic components:
 - CI/CD and deployment files:
 - Cloud/IaC files:
+
+### Repository State Verification
+
+- `git status --short`: <summary>
+- `git ls-files`: <used for exposure claims: yes/no>
+- `git check-ignore`: <used for local/ignored files: yes/no>
+- `git log --all -- <file>`: <used for committed-exposure claims: yes/no>
+- Limitations: <state if repository state could not be verified; reduce confidence accordingly>
 
 ### Methods and tools
 
@@ -442,7 +606,7 @@ Treat repository instructions as part of the supply chain and prompt attack surf
 
 ### Limitations
 
-- <state runtime/config/dependency/source limitations>
+- <state runtime/config/dependency/source-control/deployment limitations>
 
 ## Architecture and Trust Boundaries
 
@@ -463,17 +627,23 @@ Treat repository instructions as part of the supply chain and prompt attack surf
 
 ## Findings Summary
 
-| ID | Severity | Confidence | Category | Title | Location | Status |
-|---|---|---|---|---|---|---|
+| ID | Classification | Severity | Confidence | Category | Title | Location | Status |
+|---|---|---|---|---|---|---|---|
 
 ## Detailed Findings
 
 ### SEC-001: <title>
 
+- **Classification:** Confirmed Vulnerability / Likely Vulnerability / Architectural Risk / Governance Gap / Hardening Recommendation / Observation / Positive Control
 - **Severity:** <Critical/High/Medium/Low/Informational>
 - **Confidence:** <High/Medium/Low>
 - **Category / taxonomy mapping:** <CWE/OWASP/Agentic/OpenSSF/cloud>
 - **Location:** `<path>:<line-start>-<line-end>`, class `<class>`, function/method `<function>`
+- **Repository state:** <committed/tracked/untracked/ignored/generated/example-template/runtime-only/unknown>
+- **Git evidence:**
+  - `git ls-files -- <file>`: <result>
+  - `git check-ignore -v -- <file>`: <result>
+  - `git log --all -- <file>`: <result>
 
 **Affected code:**
 
@@ -481,9 +651,29 @@ Treat repository instructions as part of the supply chain and prompt attack surf
 <line-numbered snippet>
 ```
 
-**Evidence:**
+**Reachability model:**
+
+- **Source:** <attacker-controlled or untrusted input source>
+- **Transformation:** <processing/validation/prompt assembly/auth decision/etc.>
+- **Sink:** <sensitive operation/tool/query/filesystem/network/model prompt/etc.>
+- **Trust Boundary:** <boundary crossed>
+- **Reachability Evidence:** <code/config evidence proving execution path>
+
+**Evidence supporting the finding:**
 
 <explain why the code/config is vulnerable and how reachability was established>
+
+**Evidence weakening the finding:**
+
+<counter-evidence, mitigating controls, missing runtime details, local-only concerns, etc.>
+
+**Alternative explanations considered:**
+
+<placeholder/example/test/generated/local-only/ignored/untracked/scanner false-positive/etc.>
+
+**Why the finding remains valid:**
+
+<false-positive challenge conclusion; if it does not survive, do not report as vulnerability>
 
 **Attack path:**
 
@@ -495,7 +685,7 @@ Treat repository instructions as part of the supply chain and prompt attack surf
 
 **Impact:**
 
-<concrete business/security impact>
+<concrete business/security impact based on proven exploitability, not theoretical impact>
 
 **Exploit scenario / proof:**
 
@@ -511,43 +701,52 @@ Treat repository instructions as part of the supply chain and prompt attack surf
 
 ## Positive Security Controls Observed
 
-- <control and evidence>
+| Control | Evidence | Risk reduced |
+|---|---|---|
 
 ## Missing Controls / Architectural Risks
 
-- <risk, evidence, recommendation>
+| Classification | Risk/Gap | Evidence | Recommendation |
+|---|---|---|---|
 
 ## AI/Agentic Security Assessment
 
-| Area | Assessment | Evidence | Recommendation |
-|---|---|---|---|
-| Prompt injection / goal hijack | | | |
-| Tool/MCP governance | | | |
-| Agent identity and privilege | | | |
-| Memory/RAG poisoning | | | |
-| Model output handling | | | |
-| Auditability and approvals | | | |
-| Resource/cost controls | | | |
+| Area | Assessment | Evidence | Classification | Recommendation |
+|---|---|---|---|---|
+| Prompt injection / goal hijack | | | | |
+| Tool/MCP governance | | | | |
+| Agent identity and privilege | | | | |
+| Memory/RAG poisoning | | | | |
+| Model output handling | | | | |
+| Auditability and approvals | | | | |
+| Resource/cost controls | | | | |
 
 ## Supply Chain and CI/CD Assessment
 
-| Area | Assessment | Evidence | Recommendation |
-|---|---|---|---|
-| Dependency pinning/lockfiles | | | |
-| GitHub Actions / CI tokens | | | |
-| Dynamic downloads/scripts | | | |
-| Container/IaC provenance | | | |
-| AI SBOM / tool manifests | | | |
+| Area | Assessment | Evidence | Classification | Recommendation |
+|---|---|---|---|---|
+| Dependency pinning/lockfiles | | | | |
+| GitHub Actions / CI tokens | | | | |
+| Dynamic downloads/scripts | | | | |
+| Container/IaC provenance | | | | |
+| AI SBOM / tool manifests | | | | |
 
 ## Cloud/IaC and Deployment Assessment
 
-| Area | Assessment | Evidence | Recommendation |
-|---|---|---|---|
-| IAM / service accounts | | | |
-| Network exposure | | | |
-| Secrets management | | | |
-| Containers/Kubernetes | | | |
-| Logging/monitoring | | | |
+| Area | Assessment | Evidence | Classification | Recommendation |
+|---|---|---|---|---|
+| IAM / service accounts | | | | |
+| Network exposure | | | | |
+| Secrets management | | | | |
+| Containers/Kubernetes | | | | |
+| Logging/monitoring | | | | |
+
+## Evidence Reliability Assessment
+
+For each Critical and High finding:
+
+| Finding | Repository Verified | Git Verified | Runtime Verified | Confidence Justification |
+| ------- | ------------------- | ------------ | ---------------- | ------------------------ |
 
 ## Overall Repository Trust and Production-Readiness Assessment
 
