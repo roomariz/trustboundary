@@ -7,15 +7,17 @@ It reviews repositories, AI-generated code, MCP servers, agent systems, plugins 
 ## Naming
 
 - The project is TrustBoundary.
-- The npm package may be published as `repo-security-audit`.
+- The Codex plugin is `trustboundary`.
+- The npm package is currently `repo-security-audit`.
 - The CLI exposes both `trustboundary` and `repo-security-audit`.
-- The recommended command for users is `trustboundary`.
+- The recommended CLI command is `trustboundary`.
+
 
 ## Installation
 
 TrustBoundary ships two independent distribution channels. Pick whichever fits how you work:
 
-- **Codex plugin** — use the skill inside OpenAI Codex (`$repo-security-audit`, `/plugins`).
+- **Codex plugin** — use the bundled skills inside OpenAI Codex (`$repo-security-audit` / `$cybersecurity-repository-audit`, `/plugins`).
 - **npm package** — use the standalone `trustboundary` CLI in any terminal or CI job.
 
 Installing one does not install the other. The npm package never registers anything with Codex, and the Codex plugin does not put a CLI on your `PATH`.
@@ -171,11 +173,14 @@ Legacy CLI example:
 repo-security-audit /path/to/repo
 ```
 
-Codex slash command:
+Codex skill (after installing the `trustboundary` plugin — see Installation):
 
 ```text
-/trustboundary scan "." --full --sarif --explain
+$repo-security-audit
+$cybersecurity-repository-audit
 ```
+
+Codex does not use a `/trustboundary` slash command. Skills are invoked with `$<skill-name>`, browsed with `/skills`, or matched implicitly from a prompt such as "security audit this repository".
 
 OpenCode command:
 
@@ -202,9 +207,10 @@ GitHub Actions:
 
 The repository includes a ready-to-use workflow at `.github/workflows/trustboundary.yml` that runs the scan and uploads the Markdown, JSON, and SARIF outputs as artifacts. If the repository grants `security-events: write`, the workflow also uploads SARIF to GitHub code scanning on push.
 
-Skill usage:
+Skill usage (both bundled in the `trustboundary` Codex plugin):
 
-- `skills/repo-security-audit/SKILL.md`
+- `skills/repo-security-audit/SKILL.md` — runs the offline CLI scanner and summarises its output.
+- `skills/cybersecurity-repository-audit/SKILL.md` — senior-auditor manual review; ships supporting `references/`, `templates/`, and `scripts/` files.
 
 ## Safety Model
 
