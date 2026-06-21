@@ -1,6 +1,6 @@
 {
   "name": "repo-security-audit",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Repository security audit skill bundle for Codex.",
   "interface": {
     "displayName": "Repo Security Audit",
