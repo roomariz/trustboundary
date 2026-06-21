@@ -15,12 +15,13 @@ It reviews repositories, AI-generated code, MCP servers, agent systems, plugins 
 
 ## Installation
 
-TrustBoundary ships two independent distribution channels. Pick whichever fits how you work:
+TrustBoundary ships independent distribution channels. Pick whichever fits how you work:
 
 - **Codex plugin** — use the bundled skills inside OpenAI Codex (`$repo-security-audit` / `$cybersecurity-repository-audit`, `/plugins`).
+- **Claude Code commands** — use the bundled slash commands inside Claude Code (`/trustboundary:audit` / `/trustboundary:deep-audit`).
 - **npm package** — use the standalone `trustboundary` CLI in any terminal or CI job.
 
-Installing one does not install the other. The npm package never registers anything with Codex, and the Codex plugin does not put a CLI on your `PATH`.
+Installing one does not install the other. The npm package never registers anything with Codex or Claude Code, and the plugin/command bundles do not put a CLI on your `PATH`.
 
 ### Install as a Codex plugin
 
@@ -54,6 +55,25 @@ Then start a new Codex thread and invoke either skill:
 - Browse/manage: run `/plugins` (plugins) or `/skills` (skills) inside a Codex session
 
 If the plugin does not appear after installing, restart Codex — there is no hot reload. The CLI engine still requires Python 3 on `PATH`.
+
+### Claude Code commands
+
+TrustBoundary ships two Claude Code slash commands under the `trustboundary`
+namespace. They live in `.claude/commands/trustboundary/` and are available in
+any Claude Code session opened in this repository (or copy that directory into
+another repo's `.claude/commands/` to use them there):
+
+- `/trustboundary:audit` — a fast repository trust-boundary scan. It drives the
+  `repo-security-audit` skill: runs the offline CLI scanner and summarises its
+  output.
+- `/trustboundary:deep-audit` — a senior-auditor-grade deep security review. It
+  drives the `cybersecurity-repository-audit` skill: a manual, evidence-based,
+  repository-wide assessment covering conventional and AI/agentic risks.
+
+Both commands inspect the current repository, preserve strict evidence-based
+classification, and never claim a confirmed vulnerability without file, line,
+source, sink, path, trust boundary, and reachability evidence. They produce a
+concise professional report unless you ask for full detail.
 
 ### Install from GitHub (npm CLI)
 
@@ -181,6 +201,19 @@ $cybersecurity-repository-audit
 ```
 
 Codex does not use a `/trustboundary` slash command. Skills are invoked with `$<skill-name>`, browsed with `/skills`, or matched implicitly from a prompt such as "security audit this repository".
+
+Claude Code commands:
+
+```text
+/trustboundary:audit
+/trustboundary:deep-audit
+```
+
+The same audit is reachable three ways, depending on your tool:
+
+- **Codex** uses `$repo-security-audit` and `$cybersecurity-repository-audit`.
+- **Claude Code** uses `/trustboundary:audit` and `/trustboundary:deep-audit`.
+- **npm CLI** uses `trustboundary scan "." --full --sarif --explain`.
 
 OpenCode command:
 
