@@ -94,6 +94,26 @@ classification, and never claim a confirmed vulnerability without file, line,
 source, sink, path, trust boundary, and reachability evidence. They produce a
 concise professional report unless you ask for full detail.
 
+**Install via Claude Code marketplace (recommended):**
+
+Claude Code requires the marketplace.json at the repository root. The TrustBoundary
+marketplace exposes the `trustboundary` plugin with both commands and skills:
+
+```bash
+/plugin marketplace add roomariz/trustboundary
+/plugin install trustboundary@trustboundary
+```
+
+From a local clone (for development):
+
+```bash
+/plugin marketplace add .
+/plugin install trustboundary@trustboundary
+```
+
+After installation, both commands are available via `/trustboundary:audit` and
+`/trustboundary:deep-audit` in any Claude Code session.
+
 ### Install from GitHub (npm CLI)
 
 ```powershell

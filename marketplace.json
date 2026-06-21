@@ -1,0 +1,39 @@
+{
+  "name": "trustboundary",
+  "displayName": "TrustBoundary",
+  "version": "1.0.0",
+  "description": "TrustBoundary: Security and trust-boundary review toolkit for repositories, AI-generated code, MCP servers, plugins, agents, and skills. Provides evidence-based production-readiness assessment.",
+  "repository": "https://github.com/roomariz/trustboundary",
+  "plugins": [
+    {
+      "name": "trustboundary",
+      "displayName": "TrustBoundary",
+      "description": "Fast repository security audit and deep senior-auditor cybersecurity review with evidence-based production-readiness assessment.",
+      "category": "Security",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/roomariz/trustboundary"
+      },
+      "commands": [
+        {
+          "path": ".claude/commands/trustboundary/audit.md",
+          "name": "audit"
+        },
+        {
+          "path": ".claude/commands/trustboundary/deep-audit.md",
+          "name": "deep-audit"
+        }
+      ],
+      "skills": [
+        {
+          "path": "skills/repo-security-audit/SKILL.md",
+          "name": "repo-security-audit"
+        },
+        {
+          "path": "skills/cybersecurity-repository-audit/SKILL.md",
+          "name": "cybersecurity-repository-audit"
+        }
+      ]
+    }
+  ]
+}
