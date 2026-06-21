@@ -1,5 +1,6 @@
 ---
-description: Fast repository trust-boundary scan using the repo-security-audit skill
+description: Fast repository trust-boundary scan - deterministic CLI scanner with evidence-based findings
+skill: repo-security-audit
 allowed-tools: Read, Grep, Glob, Bash
 ---
 

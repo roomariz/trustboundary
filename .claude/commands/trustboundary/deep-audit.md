@@ -1,5 +1,6 @@
 ---
-description: Senior-auditor-grade deep security review using the cybersecurity-repository-audit skill
+description: Senior-auditor-grade security review - evidence-based assessment covering conventional and AI/agentic risks
+skill: cybersecurity-repository-audit
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
