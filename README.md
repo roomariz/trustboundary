@@ -1,8 +1,6 @@
 # TrustBoundary
 
-TrustBoundary is a local, deterministic, read-only repository trust-boundary auditor.
-
-It reviews repositories, AI-generated code, MCP servers, agent systems, plugins and skills.
+TrustBoundary is a reusable security and trust-boundary review toolkit for repositories, AI-generated code, MCP servers, plugins, agents, and skills. It provides local, deterministic, read-only auditing through multiple distribution channels — npm CLI, Codex plugin, and Claude Code commands — all sharing the same audit engine and evidence-based findings model.
 
 ## Naming
 
@@ -12,16 +10,37 @@ It reviews repositories, AI-generated code, MCP servers, agent systems, plugins 
 - The CLI exposes both `trustboundary` and `repo-security-audit`.
 - The recommended CLI command is `trustboundary`.
 
+## Current Capabilities
+
+- **Fast scanner-driven repository trust-boundary audit** — deterministic CLI scanner with evidence-based classification
+- **Deep senior-auditor cybersecurity review** — manual, repository-wide assessment covering conventional and AI/agentic risks
+- **AI and agentic security assessment** — prompt injection, tool abuse, agent privilege escalation, data exfiltration
+- **MCP, plugin, and skill review** — configuration and execution-path analysis for extensible systems
+- **Production-readiness assessment** — evidence-based release decision gates (READY_FOR_PRODUCTION, REVIEW_REQUIRED, NOT_READY_FOR_PRODUCTION)
 
 ## Installation
 
-TrustBoundary ships independent distribution channels. Pick whichever fits how you work:
+Install TrustBoundary once, then use the workflow you need. Choose your distribution channel based on where you work:
 
-- **Codex plugin** — use the bundled skills inside OpenAI Codex (`$repo-security-audit` / `$cybersecurity-repository-audit`, `/plugins`).
-- **Claude Code commands** — use the bundled slash commands inside Claude Code (`/trustboundary:audit` / `/trustboundary:deep-audit`).
-- **npm package** — use the standalone `trustboundary` CLI in any terminal or CI job.
+- **npm CLI** — use `trustboundary scan` in any terminal or CI job
+- **Codex plugin** — use `$repo-security-audit` or `$cybersecurity-repository-audit` inside Codex
+- **Claude Code commands** — use `/trustboundary:audit` or `/trustboundary:deep-audit` inside Claude Code
 
-Installing one does not install the other. The npm package never registers anything with Codex or Claude Code, and the plugin/command bundles do not put a CLI on your `PATH`.
+Installing one distribution channel does not install the others. The npm package does not register anything with Codex or Claude Code, and the plugin/command bundles do not put a CLI on your `PATH`.
+
+### Distribution map
+
+```text
+TrustBoundary
+├─ npm CLI
+│  └─ trustboundary scan
+├─ Codex Plugin
+│  ├─ $repo-security-audit
+│  └─ $cybersecurity-repository-audit
+└─ Claude Code
+   ├─ /trustboundary:audit
+   └─ /trustboundary:deep-audit
+```
 
 ### Install as a Codex plugin
 
@@ -93,9 +112,25 @@ trustboundary scan "." --full --sarif --explain
 
 Developers and AI-agent users need a quick way to audit unfamiliar code before trusting or using it. This matters for repositories, plugins, skills and MCP-style tooling, where security risks can hide in secrets, dependencies, execution paths and configuration.
 
+## Why TrustBoundary?
+
+Traditional SAST tools answer:
+"What vulnerabilities exist?"
+
+TrustBoundary answers:
+"Can I safely trust, execute, integrate, or deploy this repository?"
+
+The focus is trust-boundary analysis, evidence-based classification, AI/agentic security review, and production-readiness assessment rather than vulnerability counting.
+
 ## Solution
 
-This package provides a read-only, CLI-backed security audit plugin. It scans a target repository with local static checks and produces structured JSON plus a Markdown report for review.
+TrustBoundary provides a local, read-only repository trust-boundary auditing platform available through three distribution channels:
+
+- npm CLI
+- Codex plugin
+- Claude Code commands
+
+The platform performs deterministic repository analysis and can also be used through bundled audit skills for deeper security review workflows. It scans a target repository with local static checks and produces structured JSON plus a Markdown report for review.
 
 The report includes a production security gate, Top Risks, Trust Boundary Assessment, aggregated findings summary, and Infrastructure Security Review. The release decision distinguishes `REVIEW_REQUIRED` from `NOT_READY_FOR_PRODUCTION`.
 
@@ -175,7 +210,7 @@ Security-relevant findings require human review before deployment.
 
 ### NOT_READY_FOR_PRODUCTION
 
-Confirmed vulnerabilities or production-blocking findings were detected.
+Confirmed vulnerabilities, production-blocking findings, or incomplete mandatory security assessment prevented a production recommendation.
 
 ## Supported Usage
 
@@ -233,7 +268,7 @@ GitHub Actions:
 - uses: actions/checkout@v4
 - uses: actions/setup-node@v4
   with:
-    node-version: "20"
+    node-version: "24"
 - run: npm install
 - run: npx trustboundary scan . --sarif
 ```
@@ -242,8 +277,13 @@ The repository includes a ready-to-use workflow at `.github/workflows/trustbound
 
 Skill usage (both bundled in the `trustboundary` Codex plugin):
 
-- `skills/repo-security-audit/SKILL.md` — runs the offline CLI scanner and summarises its output.
-- `skills/cybersecurity-repository-audit/SKILL.md` — senior-auditor manual review; ships supporting `references/`, `templates/`, and `scripts/` files.
+- `skills/repo-security-audit/SKILL.md` — **repo-security-audit**: a fast,
+  scanner-driven trust-boundary assessment. Runs the offline CLI scanner and
+  summarises its output.
+- `skills/cybersecurity-repository-audit/SKILL.md` — **cybersecurity-repository-audit**:
+  a deep, repository-wide security review using structured evidence, threat
+  modelling, reachability analysis, and AI/agentic security assessment. Ships
+  supporting `references/`, `templates/`, and `scripts/` files.
 
 ## Safety Model
 

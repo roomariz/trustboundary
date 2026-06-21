@@ -1,7 +1,7 @@
 {
   "name": "repo-security-audit",
   "version": "2.0.0",
-  "description": "Repository security audit skill bundle for Codex.",
+  "description": "TrustBoundary: a reusable security and trust-boundary review toolkit for repositories, plugins, agents, and skills. Available as npm CLI, Codex plugin, and Claude Code commands.",
   "license": "MIT",
   "keywords": ["pi-package", "skills", "security", "audit"],
   "files": [

@@ -1,7 +1,7 @@
 {
   "name": "trustboundary",
   "version": "2.0.0",
-  "description": "TrustBoundary repository security audit bundle for Codex. Ships two skills: a deterministic CLI scanner and a senior-auditor manual review.",
+  "description": "TrustBoundary: a reusable security and trust-boundary review toolkit. Provides fast CLI-driven scanning and deep senior-auditor security assessment for repositories, AI code, MCP servers, plugins, agents, and skills.",
   "interface": {
     "displayName": "TrustBoundary",
     "category": "Security",
