@@ -5,7 +5,7 @@
   },
   "plugins": [
     {
-      "name": "repo-security-audit",
+      "name": "trustboundary",
       "source": {
         "source": "local",
         "path": "."

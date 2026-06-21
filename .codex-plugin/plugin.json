@@ -1,17 +1,11 @@
 {
-  "name": "repo-security-audit",
+  "name": "trustboundary",
   "version": "2.0.0",
-  "description": "Repository security audit skill bundle for Codex.",
+  "description": "TrustBoundary repository security audit bundle for Codex. Ships two skills: a deterministic CLI scanner and a senior-auditor manual review.",
   "interface": {
-    "displayName": "Repo Security Audit",
-    "shortDescription": "Audit repos for security risks",
-    "longDescription": "Scans a repository for secrets, unsafe execution, malicious dependencies, prompt injection, exfiltration, and MCP/tool abuse.",
+    "displayName": "TrustBoundary",
     "category": "Security",
-    "capabilities": ["Instructions"],
-    "defaultPrompt": [
-      "Use repo-security-audit for this task.",
-      "Audit this repository for security risks."
-    ]
+    "defaultPrompt": "Audit this repository for security risks."
   },
   "skills": "./skills"
 }

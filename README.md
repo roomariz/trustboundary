@@ -24,11 +24,16 @@ Installing one does not install the other. The npm package never registers anyth
 
 Requires Codex CLI v0.117.0 or newer (the version that introduced the plugin system).
 
+The `trustboundary` plugin bundles two skills, both installed together:
+
+- `repo-security-audit` — runs the deterministic offline CLI scanner and summarises its output.
+- `cybersecurity-repository-audit` — a senior-auditor manual review producing an evidence-based report.
+
 **From GitHub (recommended for most users):**
 
 ```bash
 codex plugin marketplace add roomariz/trustboundary
-codex plugin add repo-security-audit
+codex plugin add trustboundary
 ```
 
 **From a local clone (for development or offline use):**
@@ -37,14 +42,14 @@ codex plugin add repo-security-audit
 git clone https://github.com/roomariz/trustboundary.git
 cd trustboundary
 codex plugin marketplace add .
-codex plugin add repo-security-audit
+codex plugin add trustboundary
 ```
 
-Then start a new Codex thread and invoke the skill:
+Then start a new Codex thread and invoke either skill:
 
-- Explicitly: start a prompt with `$repo-security-audit`
+- Explicitly: start a prompt with `$repo-security-audit` or `$cybersecurity-repository-audit`
 - Implicitly: ask Codex to "security audit this repository"
-- Browse/manage: run `/plugins` inside a Codex session
+- Browse/manage: run `/plugins` (plugins) or `/skills` (skills) inside a Codex session
 
 If the plugin does not appear after installing, restart Codex — there is no hot reload. The CLI engine still requires Python 3 on `PATH`.
 
