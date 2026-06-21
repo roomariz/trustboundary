@@ -13,7 +13,42 @@ It reviews repositories, AI-generated code, MCP servers, agent systems, plugins 
 
 ## Installation
 
-### Install from GitHub
+TrustBoundary ships two independent distribution channels. Pick whichever fits how you work:
+
+- **Codex plugin** — use the skill inside OpenAI Codex (`$repo-security-audit`, `/plugins`).
+- **npm package** — use the standalone `trustboundary` CLI in any terminal or CI job.
+
+Installing one does not install the other. The npm package never registers anything with Codex, and the Codex plugin does not put a CLI on your `PATH`.
+
+### Install as a Codex plugin
+
+Requires Codex CLI v0.117.0 or newer (the version that introduced the plugin system).
+
+**From GitHub (recommended for most users):**
+
+```bash
+codex plugin marketplace add roomariz/trustboundary
+codex plugin add repo-security-audit
+```
+
+**From a local clone (for development or offline use):**
+
+```bash
+git clone https://github.com/roomariz/trustboundary.git
+cd trustboundary
+codex plugin marketplace add .
+codex plugin add repo-security-audit
+```
+
+Then start a new Codex thread and invoke the skill:
+
+- Explicitly: start a prompt with `$repo-security-audit`
+- Implicitly: ask Codex to "security audit this repository"
+- Browse/manage: run `/plugins` inside a Codex session
+
+If the plugin does not appear after installing, restart Codex — there is no hot reload. The CLI engine still requires Python 3 on `PATH`.
+
+### Install from GitHub (npm CLI)
 
 ```powershell
 npm uninstall -g trustboundary
