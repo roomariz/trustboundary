@@ -239,6 +239,30 @@ For each candidate issue:
 4. Confirm whether mitigating controls are central and consistently applied or local and bypassable.
 5. Identify bypasses: alternate routes, background jobs, direct service methods, webhook paths, CLI paths, async execution after approval, cached permissions, stale tokens.
 
+#### Object Identifier Access Evidence Rule
+
+**Object access by identifier alone is NOT a confirmed vulnerability.** Before reporting an IDOR (Insecure Direct Object Reference):
+
+- **Check for ownership checks**: Does the code verify `object.owner_id == current_user.id` or equivalent?
+- **Check for tenant checks**: Does the code verify `object.tenant_id == current_tenant.id` or equivalent?
+- **Classification:**
+  - If both ownership AND tenant checks are visible in the same route/handler: classify as `observed_capability` (protected object access). This is a normal, secure pattern.
+  - If checks are missing: classify as `potential_risk` or `confirmed_vulnerability` depending on reachability and evidence strength.
+  - If identity context itself is externally overrideable (e.g., `user_id` and `tenant_id` come from route parameters instead of authenticated dependencies): classify as `externally_overrideable_identity_context` (potential_risk).
+
+**Evidence supporting the finding:**
+- Object retrieved by user-supplied ID without checks: ownership bypass risk.
+- Checks present but bypassable through alternate code paths: still vulnerable.
+- Identity context overrideable through parameters: identity context override risk.
+
+**Evidence weakening the finding:**
+- Central, well-applied ownership check visible in the same handler.
+- Central, well-applied tenant scoping visible.
+- Identity derived from authenticated dependency, not route parameters.
+- Both user and tenant checks present and evaluated before returning sensitive data.
+
+**Why this rule exists:** False positives on protected object access waste auditor and engineering time. Ownership and tenant checks are normal API patterns, not vulnerabilities. Accurate classification improves actionability and trust in security findings.
+
 ### 5. AI and agentic security checklist
 
 Evaluate these categories explicitly when the repo contains AI/LLM/agent code:

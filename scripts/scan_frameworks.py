@@ -38,6 +38,37 @@ def scan_file(path, findings):
     for match in re.finditer(r"@app\.(get|post|put|patch|delete)\(([^)]*)\)", text):
         route_lines.append((match.group(1).upper(), match.group(2), _line_number(text, match.group(0)) or 1, match.group(0)))
 
+    # Detect externally overrideable identity context (user_id, tenant_id parameters)
+    for method, args, line, snippet in route_lines:
+        identity_params = re.findall(r"\b(user_id|tenant_id|org_id|workspace_id)\b", snippet)
+        if identity_params:
+            # Check if these parameters are used in ownership/tenant checks within the route body
+            has_ownership_check = re.search(r"(owner|ownership|user_id|tenant_id|org_id|workspace_id)\b", text[text.find(snippet):min(text.find(snippet)+2000, len(text))], re.IGNORECASE)
+            if has_ownership_check:
+                findings.append({
+                    "category": "framework_security",
+                    "framework": "FastAPI",
+                    "rule": "externally_overrideable_identity_context",
+                    "file": path,
+                    "line": line,
+                    "http_method": method,
+                    "route_or_handler": args.strip() or snippet,
+                    "auth_evidence": "route parameter signature",
+                    "authorization_evidence": "identity context in parameters",
+                    "role_check_evidence": None,
+                    "ownership_check_evidence": "identity-based check visible",
+                    "tenant_check_evidence": "identity-based check visible" if "tenant" in text[text.find(snippet):min(text.find(snippet)+2000, len(text))].lower() else None,
+                    "object_access_evidence": None,
+                    "missing_evidence": "dependency injection of authenticated context",
+                    "proof_status": "implicit",
+                    "finding_class": "potential_risk",
+                    "evidence_level": "partial",
+                    "confidence_reason": "Identity or tenant context may be externally overrideable if parameters are not dependency-injected.",
+                    "boundary_crossing": True,
+                    "evidence_redacted": "Identity context parameters in route signature",
+                    "base_confidence": 72,
+                })
+
     if "fastapi" in lower:
         has_auth_guard = re.search(AUTH_DECORATOR_PATTERNS, text, re.IGNORECASE)
         for method, args, line, snippet in route_lines:
@@ -214,29 +245,35 @@ def scan_file(path, findings):
         object_access_match = OBJECT_ACCESS_PATTERNS.search(text)
         if object_access_match and re.search(r"\b(id|uuid|pk)\b", lower):
             has_ownership = re.search(r"(owner|ownership|user_id|tenant_id|org_id|workspace_id)\b", lower) or re.search(r"current_user\.(id|user_id)", lower) or re.search(r"current_user\s*==\s*\w+|\w+\s*==\s*current_user", lower)
-            findings.append({
-                "category": "framework_security",
-                "framework": "FastAPI",
-                "rule": "object_id_access",
-                "file": path,
-                "line": _line_number(text, object_access_match.group(0)),
-                "http_method": None,
-                "route_or_handler": "fastapi handler",
-                "auth_evidence": "route detected",
-                "authorization_evidence": "object access by id",
-                "role_check_evidence": None,
-                "ownership_check_evidence": "ownership or tenant check" if has_ownership else None,
-                "tenant_check_evidence": "tenant filter" if has_ownership else None,
-                "object_access_evidence": "object access by identifier",
-                "missing_evidence": None if has_ownership else "ownership or tenant check",
-                "proof_status": "explicit" if has_ownership else "implicit",
-                "finding_class": "potential_risk",
-                "evidence_level": "partial",
-                "confidence_reason": "Object access by identifier is visible, but ownership evidence is incomplete.",
-                "boundary_crossing": True,
-                "evidence_redacted": "Object access by identifier",
-                "base_confidence": 68 if not has_ownership else 55,
-            })
+            has_tenant_check = re.search(r"tenant_id\s*[=><]|\.eq\(\s*[\"']tenant_id[\"']|\btenant_id\b", lower)
+
+            # When ownership and tenant checks are visible, object access is protected
+            # Only report if checks are missing
+            if not has_ownership:
+                findings.append({
+                    "category": "framework_security",
+                    "framework": "FastAPI",
+                    "rule": "object_id_access",
+                    "file": path,
+                    "line": _line_number(text, object_access_match.group(0)),
+                    "http_method": None,
+                    "route_or_handler": "fastapi handler",
+                    "auth_evidence": "route detected",
+                    "authorization_evidence": "object access by id",
+                    "role_check_evidence": None,
+                    "ownership_check_evidence": None,
+                    "tenant_check_evidence": None,
+                    "object_access_evidence": "object access by identifier",
+                    "missing_evidence": "ownership or tenant check",
+                    "proof_status": "implicit",
+                    "finding_class": "potential_risk",
+                    "evidence_level": "partial",
+                    "confidence_reason": "Object access by identifier is visible without visible ownership or tenant checks.",
+                    "boundary_crossing": True,
+                    "evidence_redacted": "Object access by identifier",
+                    "base_confidence": 68,
+                })
+
             if has_ownership:
                 findings.append({
                     "category": "framework_security",
@@ -250,16 +287,16 @@ def scan_file(path, findings):
                     "authorization_evidence": "ownership or tenant check",
                     "role_check_evidence": None,
                     "ownership_check_evidence": "ownership or tenant check",
-                    "tenant_check_evidence": "tenant filter",
-                    "object_access_evidence": "object access by identifier",
+                    "tenant_check_evidence": "tenant filter" if has_tenant_check else "ownership or tenant check",
+                    "object_access_evidence": "protected object access by identifier",
                     "missing_evidence": None,
                     "proof_status": "explicit",
                     "finding_class": "observed_capability",
                     "evidence_level": "capability",
-                    "confidence_reason": "Ownership or tenant evidence is visible for object access by id.",
-                    "boundary_crossing": True,
-                    "evidence_redacted": "Object access with ownership check",
-                    "base_confidence": 75,
+                    "confidence_reason": "Object access by identifier is protected by visible ownership or tenant checks.",
+                    "boundary_crossing": False,
+                    "evidence_redacted": "Protected object access with ownership/tenant check",
+                    "base_confidence": 80,
                 })
 
     if "supabase" in lower:
